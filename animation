@@ -1,0 +1,40 @@
+local character = script.Parent
+local humanoid = character:WaitForChild("Humanoid")
+local animator = humanoid:WaitForChild("Animator")
+
+-- #idle
+local idle = Instance.new("Animation")
+idle.AnimationId = "rbxassetid://IDLE_ANIMATION_ID"
+
+-- #walk
+local walk = Instance.new("Animation")
+walk.AnimationId = "rbxassetid://WALK_ANIMATION_ID"
+
+-- #run
+local run = Instance.new("Animation")
+run.AnimationId = "rbxassetid://RUN_ANIMATION_ID"
+
+-- #jump
+local jump = Instance.new("Animation")
+jump.AnimationId = "rbxassetid://JUMP_ANIMATION_ID"
+
+local idleTrack = animator:LoadAnimation(idle)
+local walkTrack = animator:LoadAnimation(walk)
+local runTrack = animator:LoadAnimation(run)
+local jumpTrack = animator:LoadAnimation(jump)
+
+idleTrack:Play()
+
+humanoid.Running:Connect(function(speed)
+	if speed > 0 then
+		idleTrack:Stop()
+		walkTrack:Play()
+	else
+		walkTrack:Stop()
+		idleTrack:Play()
+	end
+end)
+
+humanoid.Jumping:Connect(function()
+	jumpTrack:Play()
+end)
